@@ -17,3 +17,7 @@ spec:
       name: staging
     autoPromotionEnabled: true
   # prod is promoted by hand (same PR gate).
+  # prod-release: Freight that passes prod verification is tagged automatically.
+  - stageSelector:
+      name: prod-release
+    autoPromotionEnabled: true

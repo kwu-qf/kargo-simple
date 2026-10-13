@@ -512,6 +512,126 @@ Steps to try it:
 
 Reference: https://docs.kargo.io/user-guide/reference-docs/webhook-receivers/github
 
+### Later: handling queued promotions (design notes, not implemented)
+
+Status: **not implemented yet**. Verified against the Kargo **v1.12.4** source
+code. Today, handle a backlog by hand (see "What to do today" below).
+
+#### What Kargo v1.12.4 does
+
+If a staging PR is still open and newer Freight passes dev, Kargo does **not**
+open a second PR. It queues another Promotion behind the one waiting on the PR.
+
+| Behaviour | Where in v1.12.4 |
+|---|---|
+| Auto-promotion picks one candidate per origin: the newest Freight by discovery time | `pkg/api/auto_promotion.go` (`SelectAutoPromotionCandidates`) |
+| Each new candidate gets its own Promotion; older queued Promotions are **not** cancelled, so the queue grows (B, C, D, ...) | `pkg/controller/stages/regular_stages.go` (`autoPromoteFreight`) |
+| One Promotion runs per Stage at a time, oldest first. Names are `<stage>.<ULID>.<hash>`, and the ULID sorts by time | `pkg/api/promotion.go` (`GeneratePromotionName`), `pkg/controller/promotions/promotions.go` |
+| Freight whose last finished Promotion was not `Succeeded` (failed, aborted) is not auto-promoted again | `autoPromoteFreight` |
+| Manually promoting older Freight pauses auto-promotion for that Stage (a "hold") until the newest is promoted | `computeEffectiveAutoPromotionHolds` |
+| Known issue [#7032](https://github.com/akuity/kargo/issues/7032): the next Promotion only waits for verification while the Stage is `Healthy` (or health unknown), so a back-to-back Promotion can skip verifying the previous Freight | `regular_stages.go`, verification gate before the next Promotion |
+| No built-in "supersede" option ([#3108](https://github.com/akuity/kargo/issues/3108), open) | — |
+| No plugin mechanism for custom promotion steps; only built-in steps | open-source source tree |
+| Built-in steps that help: `http` (success/failure/error expressions), `fail`, `argocd-wait` | `pkg/promotion/runner/builtin/` |
+| Expression context that helps: `ctx.promotion`, `ctx.stage`, `ctx.project`, `ctx.meta.promotion.rollback`; `secret()` reads only Secrets labelled `kargo.akuity.io/cred-type: generic` | `pkg/promotion/evaluator.go`, `pkg/expressions/function/functions.go` |
+
+Kargo v1.12 keeps all of this (Freight, Promotions, Stages, holds) as
+Kubernetes resources in the cluster, with no database or files. The queue is
+just Promotions in phase `Pending`:
+
+```shell
+kubectl get promotions -n kargo-simple --sort-by=.metadata.creationTimestamp
+```
+
+Kargo 2.0 plans to change how state is stored (the chart on `main` already has a
+`database` section, unused by v1.12).
+
+#### What to do today (manual)
+
+```shell
+kargo get promotions --project kargo-simple --stage staging      # Running = waiting on the open PR, Pending = queued
+kargo promote --project kargo-simple --name <promotion> --abort  # abort each stale one
+```
+
+Close the stale PR on GitHub too (aborting does not close it). Merging an old PR
+deploys that old Freight first, and the next queued one follows.
+
+#### Planned design: three small layers, no Kargo changes
+
+**Layer 0: `argocd-wait` after `argocd-update`** in `kargo/promotiontask.yaml`.
+The Promotion ends only once the Argo CD app is Healthy, which avoids #7032.
+
+**Layer 1: a "superseded" guard as the first step of the promote task.** When a
+queued Promotion starts, it lists Promotions for its Stage. If a newer one is
+queued, it fails right away (before any PR), and Kargo won't retry that Freight.
+When the open PR is merged or closed, the older queued Promotions fail in
+seconds and only the newest opens a PR.
+
+```yaml
+- uses: http
+  as: supersedeGuard
+  if: ${{ !ctx.meta.promotion.rollback }}        # never block deliberate rollbacks
+  config:
+    method: GET
+    url: https://kubernetes.default.svc/apis/kargo.akuity.io/v1alpha1/namespaces/${{ ctx.project }}/promotions
+    headers:
+    - name: Authorization
+      value: Bearer ${{ secret('promotion-guard').token }}
+    insecureSkipTLSVerify: true                    # cluster-internal CA; revisit on EKS
+    successExpression: >-
+      response.status == 200 && len(filter(response.body.items,
+        {.spec.stage == '${{ ctx.stage }}' && .metadata.name > '${{ ctx.promotion }}'
+         && (.status?.phase ?? '') in ['', 'Pending']})) == 0
+    failureExpression: >-
+      response.status != 200 || len(filter(response.body.items,
+        {.spec.stage == '${{ ctx.stage }}' && .metadata.name > '${{ ctx.promotion }}'
+         && (.status?.phase ?? '') in ['', 'Pending']})) > 0
+    errorExpression: "'superseded by a newer queued Promotion (or guard could not list Promotions)'"
+```
+
+Supporting file (planned `kargo/promotion-guard.yaml`, applied with `kubectl`):
+a ServiceAccount `promotion-guard`, a Role allowing `get`/`list` on
+`promotions` in `kargo-simple`, a RoleBinding, and a token Secret
+(`type: kubernetes.io/service-account-token`) named `promotion-guard` and
+labelled `kargo.akuity.io/cred-type: generic` so `secret()` can read it. The
+token is generated in the cluster; nothing sensitive is in Git.
+
+**Layer 2: retire the PR that is already open.** The Promotion waiting on an
+open PR blocks the queue, so nothing inside Kargo can replace that PR. Either:
+
+* close it by hand (zero code); Layer 1 then drains the queue to the newest, or
+* run a small script (planned `scripts/retire-stale-prs.sh`, `kubectl` + `gh`):
+  for each Stage, if a Promotion is Running and a newer one is Pending, close
+  the PR whose head branch is `kargo/promotion/<running-promotion-name>`
+  (`git-push` with `generateTargetBranch` names it that way), with a comment
+  pointing at the newer Freight. Run by hand, in a loop, or later as a CronJob.
+
+**Not recommended**
+
+* Comparing PR commit SHAs to Freight: the Promotion order (ULID names) already
+  identifies the newest exactly.
+* Deleting Freight (`kargo delete freight`): Freight is the history and audit
+  record, and queued Promotions reference it. Fail or abort Promotions instead;
+  Kargo's garbage collector handles retention.
+* A custom step plugin: not supported in v1.12.4.
+
+**Caveats**
+
+* `insecureSkipTLSVerify` is needed because the controller doesn't trust the
+  cluster CA for this call. Acceptable on kind; revisit on EKS.
+* The `http` step reads at most 2 MiB of response; fine while the garbage
+  collector keeps the Promotion list small.
+* Untested. Check the Promotion name format first
+  (`kubectl get promotions -n kargo-simple -o name`, expect `staging.<ULID>.<hash>`).
+
+**Test plan once implemented**
+
+1. Promote to staging and leave its PR open.
+2. Push three image tags (v0.0.3, v0.0.4, v0.0.5) and let them pass dev.
+3. `kargo get promotions --project kargo-simple --stage staging`: one Running, three Pending.
+4. Close the open PR (or run the retire script).
+5. Expect v0.0.3 and v0.0.4 to fail with "superseded", and only v0.0.5 to open a PR.
+
 ### Troubleshooting
 
 #### Warehouse: `error listing tags ... ghcr.io/token ... UNAUTHORIZED: authentication required`

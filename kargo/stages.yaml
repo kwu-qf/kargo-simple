@@ -91,3 +91,49 @@ spec:
     args:
     - name: namespace
       value: guestbook-simple-prod
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: prod-release
+  namespace: kargo-simple
+  annotations:
+    kargo.akuity.io/color: green
+spec:
+  # Freight becomes available here only after it passes prod verification.
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: guestbook
+    sources:
+      stages:
+      - prod
+  # Deploys nothing: tags the Freight's commit of main as a release.
+  # The tag name includes the short SHA because the same image tag can ship
+  # with different config.
+  promotionTemplate:
+    spec:
+      vars:
+      - name: repoURL
+        value: https://github.com/kwu-qf/kargo-simple.git
+      - name: image
+        value: ghcr.io/kwu-qf/guestbook
+      - name: releaseTag
+        value: release-${{ imageFrom(vars.image).Tag }}-${{ commitFrom(vars.repoURL).ID[0:7] }}
+      steps:
+      - uses: git-clone
+        config:
+          repoURL: ${{ vars.repoURL }}
+          checkout:
+          - commit: ${{ commitFrom(vars.repoURL).ID }}
+            path: ./src
+      - uses: git-tag
+        config:
+          path: ./src
+          tag: ${{ vars.releaseTag }}
+          message: "prod verified: ${{ imageFrom(vars.image).Tag }} @ ${{ commitFrom(vars.repoURL).ID }} (Freight ${{ ctx.targetFreight.name }})"
+      - uses: git-push
+        config:
+          path: ./src
+          tag: ${{ vars.releaseTag }}

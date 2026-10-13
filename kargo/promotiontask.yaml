@@ -43,6 +43,18 @@ spec:
       outPath: ./out
 
   # --- approval gate: one PR on main changing versions/<stage>.yaml ---------
+  # Read the previously approved record before it is overwritten, so the PR
+  # can link to the config diff between the old and new configCommit.
+  - uses: yaml-parse
+    if: ${{ vars.approval == 'true' }}
+    as: prev
+    config:
+      path: ./main/versions/${{ ctx.stage }}.yaml
+      outputs:
+      - name: tag
+        fromExpression: tag
+      - name: configCommit
+        fromExpression: configCommit
   - uses: yaml-update
     if: ${{ vars.approval == 'true' }}
     config:
@@ -75,6 +87,13 @@ spec:
       sourceBranch: ${{ task.outputs.pushRecord.branch }}
       targetBranch: main
       title: "Promote to ${{ ctx.stage }}: ${{ imageFrom(vars.image).Tag }}"
+      # On the first promotion versions/<stage>.yaml is empty: no diff to link.
+      description: |
+        Freight: `${{ ctx.targetFreight.name }}`
+
+        Image: `${{ task.outputs.prev.tag == '' ? '(none)' : task.outputs.prev.tag }}` → `${{ imageFrom(vars.image).Tag }}`
+
+        Config diff: ${{ task.outputs.prev.configCommit == '' ? '(first promotion, nothing to compare)' : trimSuffix(vars.repoURL, '.git') + '/compare/' + task.outputs.prev.configCommit + '...' + commitFrom(vars.repoURL).ID }}
   # A rejected or closed PR fails the Promotion here: nothing is pushed or deployed.
   - uses: git-wait-for-pr
     if: ${{ vars.approval == 'true' }}
