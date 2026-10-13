@@ -1,6 +1,6 @@
 # Kargo's record of what was approved for staging.
 # Changed only through Kargo promotion PRs. Do not edit by hand.
-freight: 4339bc427ba2cfb09cdd4bad4843777d9cb314ec
+freight: 77a4631606252acf5324c53c70d3bda777e25ea1
 image: ghcr.io/kwu-qf/guestbook
-tag: v0.0.3
+tag: v0.0.4
 configCommit: 4622cae4e50cd1e39317b7cd4fb7a49a41ead554
