@@ -1,0 +1,14 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: ProjectConfig
+metadata:
+  # Must have the same name as the Project and live in its namespace.
+  name: kargo-simple
+  namespace: kargo-simple
+spec:
+  promotionPolicies:
+  # dev: every new Freight from the Warehouse is promoted and deployed automatically.
+  - stageSelector:
+      name: dev
+    autoPromotionEnabled: true
+  # staging and prod are promoted by hand; each Promotion opens a PR on main
+  # (versions/<stage>.yaml) and deploys only after that PR merges.

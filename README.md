@@ -4,125 +4,475 @@ This is a GitOps repository of a simple Kargo example for getting started.
 
 ### Features:
 
-* A Warehouse which monitors a container repository for new images
+* A Warehouse which monitors a container repository for new images and `main`
+  for config changes (Freight = image tag + commit of `main`)
 * Three Stage (dev, staging, prod) deploy pipeline
-* Image tag promotion
-* PromotionTask with a conditional pull request
-* Direct Git commits to dev, staging
-* Pull request for promotion to prod
+* Each Stage renders its own overlay at the Freight's commit and pushes the
+  rendered YAML to a `stage/<stage>` branch
+* dev deploys directly
+* staging and prod deploy only after a Kargo PR on `main` that updates
+  `versions/<stage>.yaml` is approved and merged
 
-This example does not require an Argo CD instance and so would work with any
-GitOps operator (Argo CD, Flux) that detects and deploys manifest changes from
-a path in a Git repository automatically (e.g. using auto-sync).
+Each Stage is deployed by an Argo CD Application in `argocd/<stage>/` that
+tracks the root of the `stage/<stage>` branch. Kargo's `argocd-update` step
+syncs it after each promotion.
 
-## Requirements
+To bring the whole environment up (or back after a teardown), follow the
+[Runbook](#runbook-local-kind-environment).
 
-* Kargo v1.3.x (for older Kargo versions, switch to the release-X.Y branch)
-* GitHub and a container registry (GHCR.io)
-* `git` and `docker` installed
+## Repo layout and branches
 
-## Instructions
+```
+main (protected, PRs only)
+├── base/            # shared config; flows dev → staging → prod
+│   ├── namespace.yaml
+│   ├── configmap.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── kustomization.yaml
+├── components/      # optional shared, opt-in features
+├── stages/          # env-specific values only; written by people
+│   ├── dev/         # replicas: 1, debug logging
+│   ├── staging/     # replicas: 2
+│   └── prod/        # replicas: 4, HPA, PDB, larger resources
+├── versions/        # Kargo's record, changed only through Kargo PRs
+│   ├── staging.yaml
+│   └── prod.yaml
+├── argocd/          # one Argo CD Application per Stage, tracking stage/<stage>
+│   ├── dev/
+│   ├── staging/
+│   └── prod/
+└── kargo/           # Kargo Project, Warehouse, Stages, PromotionTask
 
-1. Fork this repo, then clone it locally (from your fork).
-2. Run the `personalize.sh` to customize the manifests to use your GitHub
-   username:
+stage/dev  stage/staging  stage/prod   # rendered YAML; only Kargo pushes
+```
+
+| Location | Answers | Written by | Edit by hand |
+|---|---|---|---|
+| `base/`, `components/` | What every environment runs | People, via PR | Yes |
+| `stages/<stage>/` | How this environment differs | People, via PR | Yes |
+| `versions/<stage>.yaml` | Which version was approved for this environment | Kargo, via PR | No |
+| `argocd/<stage>/` | Which Argo CD Application deploys this environment | People, via PR | Yes |
+| `stage/<stage>` branch | Exactly what was deployed | Kargo | No (overwritten each promotion) |
+
+Image tags are never committed to `main`: Kargo sets the tag at render time.
+The `stage/<stage>` branches are created by Kargo on the first promotion.
+
+The Warehouse watches `argocd/`, `base/`, `components/` and `stages/` on `main` and
+excludes `versions/`, so merging a Kargo PR never creates new Freight.
+
+### Branch protection
+
+* `main`: PRs required, required status checks, CODEOWNERS
+  (`.github/CODEOWNERS`: `stages/prod/` → prod owners, `stages/staging/` →
+  staging owners).
+* `stage/*`: push restricted to the Kargo GitHub App (or the token in
+  `github-creds`).
+* Turn on "automatically delete head branches" so Kargo's temporary PR
+  branches are cleaned up.
+
+## Runbook: local kind environment
+
+Everything below is repeatable: tear the cluster down and come back by running
+the steps again. Run them in your own terminal (not through an AI assistant),
+so tokens stay out of transcripts.
+
+| URL | What | Login |
+|---|---|---|
+| http://localhost:31080 | Argo CD | `admin` / `admin` |
+| http://localhost:31081 | Kargo | `admin` |
+| http://localhost:32080 / 32081 / 32082 | guestbook dev / staging / prod | — |
+
+### Requirements
+
+* Docker Desktop (running), `kind`, `kubectl`, `helm`, `kargo` CLI **v1.12.4** (must match the server: v1.12 removed the old API, so a v1.11 CLI fails against it), `git`
+* A **classic** GitHub PAT (`ghp_...`). Fine-grained tokens (`github_pat_...`)
+  do not work with ghcr.io. Scopes:
+  * `repo`: Kargo pushes `stage/*` branches and opens PRs on `main`
+  * `write:packages`: you push images to ghcr.io (includes `read:packages`,
+    which Kargo needs if the package is private)
+* Never store the PAT in a file in this repo or in plain-text notes.
+
+### Kargo v1.12 notes
+
+The manifests in `kargo/` target Kargo v1.12.4:
+
+* Auto-promotion is set in `kargo/projectconfig.yaml` (`ProjectConfig`), not on the Project.
+* Warehouse subscriptions are named (`guestbook-image`, `gitops-config`), and
+  `includePaths`/`excludePaths` are exact paths (prefix `glob:` or `regex:` for patterns).
+* `git-open-pr` outputs `pr.id`; it no longer accepts `createTargetBranch`.
+* `git-commit` no longer accepts `author`; set it on `git-clone` if needed.
+* `git-push` now rebases, or merges if a rebase isn't possible (`RebaseOrMerge`),
+  when the remote branch moved.
+
+### 0. One-time setup (skip on rebuild)
+
+1. Fork this repo, clone your fork, personalize and push:
 
    ```shell
    ./personalize.sh <yourgithubusername>
-   ```
-3. `git commit` the personalized changes:
-
-   ```shell
    git commit -a -m "personalize manifests"
    git push
    ```
-4. Create a guestbook container image repository in your GitHub account. 
 
-   The easiest way to create a new ghcr.io image repository, is by retagging and 
-   pushing an existing image with your GitHub username. See [Authenticating to the GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-github-container-registry)
-   for instructions on how to log in to ghcr.io with Docker.
+2. Log in to ghcr.io and create the first image tag:
 
    ```shell
-   docker login ghcr.io
+   export GH_PAT=ghp_xxx
+   echo "$GH_PAT" | docker login ghcr.io -u <yourgithubusername> --password-stdin
 
    docker buildx imagetools create \
      ghcr.io/akuity/guestbook:latest \
      -t ghcr.io/<yourgithubusername>/guestbook:v0.0.1
    ```
 
-   You will now have a `guestbook` container image repository. e.g.:
-   https://github.com/users/yourgithubusername/packages/container/package/guestbook
+   Confirm the tag exists (an empty list or `NAME_UNKNOWN` means the push did
+   not happen):
 
-5. Change guestbook container image repository to public.
+   ```shell
+   T=$(curl -s -u <yourgithubusername>:"$GH_PAT" \
+     "https://ghcr.io/token?scope=repository:<yourgithubusername>/guestbook:pull&service=ghcr.io" \
+     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+   curl -s -H "Authorization: Bearer $T" https://ghcr.io/v2/<yourgithubusername>/guestbook/tags/list
+   # expect: {"name":"<yourgithubusername>/guestbook","tags":["v0.0.1"]}
+   ```
 
-   In the GitHub UI, navigate to the "guestbook" container repository, Package
-   settings, and change the visibility of the package to public. This will allow
-   Kargo to monitor this repository for new images, without requiring you to 
-   configuring Kargo with container image repository credentials.
+   A `403 ... does not match expected scopes` error means the token is
+   fine-grained or lacks `write:packages`. Check with
+   `curl -sI -H "Authorization: Bearer $GH_PAT" https://api.github.com/user | grep -i x-oauth-scopes`.
+   If the scopes are right, `docker logout ghcr.io` and log in again.
+
+3. Optional: make the `guestbook` package public (Package settings →
+   visibility) so Kargo needs no image credentials.
 
    ![change-package-visibility](docs/change-package-visibility.png)
 
-6. Download and install the latest CLI from [Kargo Releases](https://github.com/akuity/kargo/releases/latest)
+4. Install the Kargo CLI v1.12.4 and check it:
 
    ```shell
-   ./download-cli.sh /usr/local/bin/kargo
+   ./download-cli.sh /usr/local/bin/kargo v1.12.4   # or: brew upgrade kargo
+   kargo version --client
    ```
 
-7. Login to Kargo:
+### 1. Create the cluster (Argo CD, Argo Rollouts, cert-manager, Kargo)
 
-   ```shell
-   kargo login --admin https://<kargo-url>
-   ```
-   
-    You may need to use the `--insecure-skip-tls-verify` flag if your Kargo
-    instance is using a self-signed or untrusted TLS certificate.
+Uses the [Kargo quickstart](https://docs.kargo.io/quickstart) script. It creates
+a kind cluster named `kargo-quickstart` with hard-coded local-only passwords.
 
-8. Apply the Kargo manifests:
+```shell
+curl -fsSLo kind.sh https://raw.githubusercontent.com/akuity/kargo/main/hack/quickstart/kind.sh
+# Pin Kargo to v1.12.4 (the script installs the latest chart otherwise)
+sed -i.bak 's#oci://ghcr.io/akuity/kargo-charts/kargo \\#oci://ghcr.io/akuity/kargo-charts/kargo --version 1.12.4 \\#' kind.sh
+grep -n 'kargo-charts/kargo' kind.sh     # expect: ... --version 1.12.4 \
+sh kind.sh
+helm list -n kargo                       # expect: APP VERSION v1.12.4
+kubectl config current-context    # expect: kind-kargo-quickstart
+```
 
-   ```shell
-   kargo apply -f ./kargo
-   ```
+### 2. Make sure GitHub has the current repo
 
-9. Add the Git repository credentials to Kargo. This can also be done in the UI
-   in the `kargo-simple` Project.
+Argo CD and Kargo read this repo from GitHub, not from your laptop.
 
-   ```shell
-   kargo create credentials github-creds \
-     --project kargo-simple \
-     --git \
-     --username <yourgithubusername> \
-     --repo-url https://github.com/<yourgithubusername>/kargo-simple.git
-   ```
+```shell
+git status
+git push
+```
 
-   As part of the promotion process, Kargo requires privileges to commit changes
-   to your Git repository, as well as the ability to create pull requests. Ensure
-   that the given token has these privileges.  See [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
-   for further instructions on managing GitHub tokens.
+### 3. Create the Argo CD Applications
 
-10. Promote the image!
+```shell
+kubectl apply -R -f argocd/
+kubectl get applications -n argocd
+```
 
-    You now have a Kargo Pipeline which promotes images from the guestbook
-    container image repository, through a three-stage deploy pipeline. Visit
-    the `kargo-simple` Project in the Kargo UI to see the deploy pipeline.
+Each Application shows an error until its first promotion: Kargo creates the
+`stage/<stage>` branch it points at. If the repo is private, also add it in
+Argo CD (Settings → Repositories) with the PAT.
 
-    ![pipeline](docs/pipeline.png)
+### 4. Deploy Kargo (`kargo/`)
 
-    To promote, click the truck icon in the `dev` Stage, click Promote, select
-    the detected Freight, and confirm the promotion. Alternatively, you can drag the
-    freight from the Warehouse to the `dev` Stage. Once promoted, 
-    the Freight will be qualified to be promoted to downstream Stages (`staging`, `prod`).
+Kargo runs in the cluster from step 1. This step loads the pipeline into it.
 
-    ![promotion](docs/promotion.gif)
+| File | Creates | Purpose |
+|---|---|---|
+| `kargo/project.yaml` | Project `kargo-simple` | Namespace that holds everything below |
+| `kargo/projectconfig.yaml` | ProjectConfig `kargo-simple` | Auto-promotion for `dev` |
+| `kargo/warehouse.yaml` | Warehouse `guestbook` | Watches ghcr.io tags and `main` (`argocd`, `base`, `components`, `stages`) and creates Freight |
+| `kargo/promotiontask.yaml` | PromotionTask `promote` | Renders `stages/<stage>`, opens the `versions/<stage>.yaml` PR (staging, prod), pushes `stage/<stage>`, syncs the Argo CD app |
+| `kargo/stages.yaml` | Stages `dev`, `staging`, `prod` | The pipeline dev → staging → prod, each with a smoke-test verification |
+| `kargo/analysistemplate.yaml` | AnalysisTemplate `smoke-test` | `curl` to `http://guestbook-simple.<namespace>.svc.cluster.local/info` after each deploy |
 
+Prerequisites: steps 2 and 3 are done (`main` on GitHub has this layout and the
+Argo CD Applications exist), and the `kargo` CLI is v1.12.4.
 
-## Simulating a release
+**4a. Log in**
 
-To simulate a release, simply retag an image with a newer semantic version. e.g.:
+```shell
+kargo login http://localhost:31081 --admin --password admin
+kargo config set-project kargo-simple     # default project for later commands
+```
+
+**4b. Create the Project first, then the credentials**
+
+Creating the credentials before the Warehouse lets it discover Freight on its
+first try instead of erroring.
+
+```shell
+kargo apply -f kargo/project.yaml
+
+export GH_PAT=ghp_xxx    # classic PAT: repo (+ read:packages if the image is private)
+
+# Git: Warehouse reads main; promotions push stage/* branches and open PRs
+kargo create repo-credentials github-creds --project kargo-simple --git \
+  --username <yourgithubusername> --password "$GH_PAT" \
+  --repo-url https://github.com/<yourgithubusername>/kargo-simple.git
+
+# Image: only needed if the guestbook package is private
+kargo create repo-credentials ghcr-creds --project kargo-simple --image \
+  --username <yourgithubusername> --password "$GH_PAT" \
+  --repo-url ghcr.io/<yourgithubusername>/guestbook
+
+kargo get repo-credentials --project kargo-simple
+```
+
+**4c. Apply the rest of `kargo/`**
+
+```shell
+kargo apply -f kargo/
+# If kargo apply rejects the AnalysisTemplate (an Argo Rollouts kind), apply it with kubectl:
+kubectl apply -f kargo/analysistemplate.yaml
+```
+
+Re-applying the whole folder is safe; `project.yaml` is unchanged.
+
+**4d. Verify**
+
+```shell
+kargo get projectconfig --project kargo-simple
+kargo get warehouses --project kargo-simple
+kargo get stages --project kargo-simple                 # dev, staging, prod
+kubectl get promotiontasks -n kargo-simple              # promote
+kubectl get analysistemplates -n kargo-simple           # smoke-test
+kargo refresh warehouse guestbook --project kargo-simple
+kargo get freight --project kargo-simple                # expect at least one Freight
+kargo get promotions --project kargo-simple             # dev should start automatically
+```
+
+Then check the Kargo UI (http://localhost:31081 → `kargo-simple`) and Argo CD
+(http://localhost:31080 → `kargo-simple-dev` should be Synced and Healthy).
+
+If no Freight appears, `kubectl describe warehouse guestbook -n kargo-simple`
+shows the error (usually credentials or a wrong `repoURL`).
+
+**Changing `kargo/` later**
+
+Edit the file, commit and push (keep Git as the record), then re-apply:
+
+```shell
+kargo apply -f kargo/
+```
+
+To remove the pipeline but keep the cluster:
+
+```shell
+kargo delete project kargo-simple     # deletes everything in the Project, including credentials
+```
+
+### 5. Promote
+
+![pipeline](docs/pipeline.png)
+
+* **dev**: automatic (`kargo/projectconfig.yaml`). Every new Freight is
+  promoted to dev: Kargo renders `stages/dev`, pushes `stage/dev` and syncs
+  `kargo-simple-dev`. Open http://localhost:32080. Watch it with
+  `kargo get promotions --project kargo-simple`.
+* **staging / prod**: promote the same way. Kargo opens a PR on `main`
+  updating `versions/<stage>.yaml`. Merge it to deploy; close it to cancel.
+  Then open http://localhost:32081 or :32082.
+
+After each deploy, the Stage runs the `smoke-test` verification (a `curl`
+Job). Only Freight that passes is verified and can be promoted to the next
+Stage.
+
+```shell
+kubectl get analysisruns -n kargo-simple                # Successful / Failed
+kargo logs <analysisrun-name> --project kargo-simple    # curl output
+```
+
+![promotion](docs/promotion.gif)
+
+### When verification fails
+
+The deploy stays in place (Kargo does not roll back on its own), and the Freight
+is not verified, so it cannot move to the next Stage.
+
+| Option | Command |
+|---|---|
+| Read the curl output | `kargo logs <analysisrun-name> --project kargo-simple` |
+| Re-run (flaky check, or after fixing the cluster) | `kargo verify stage dev --project kargo-simple` |
+| Roll back: promote the last good Freight. On `dev` this places an auto-promotion hold, so the bad Freight is not promoted again | `kargo promote --project kargo-simple --freight <good-freight> --stage dev` |
+| Resume auto-promotion on `dev` after a fix | `kargo promote --project kargo-simple --warehouse guestbook --stage dev` |
+| Fix forward: new image tag or config commit → new Freight → dev auto-promotes | push a new tag or merge to `main` |
+| Skip verification for one Freight (use sparingly) | `kargo approve --project kargo-simple --freight <freight> --stage staging` |
+
+### 6. Simulate a release
 
 ```shell
 docker buildx imagetools create \
   ghcr.io/akuity/guestbook:latest \
   -t ghcr.io/<yourgithubusername>/guestbook:v0.0.2
+kargo refresh warehouse guestbook --project kargo-simple
 ```
 
-Then refresh the Warehouse in the UI to detect the new Freight.
+A config change merged to `argocd/`, `base/`, `components/` or `stages/` on
+`main` also creates new Freight. Either way, dev is promoted automatically;
+staging needs a manual promotion and a merged PR.
+
+### Troubleshooting
+
+#### Warehouse: `error listing tags ... ghcr.io/token ... UNAUTHORIZED: authentication required`
+
+Kargo could not read the image tags. ghcr.io returns this same error when the
+package is **private** and Kargo has no (valid) credentials, and when the
+package **does not exist** (for example, the first push failed).
+
+1. Check whether the package is readable anonymously:
+
+   ```shell
+   curl -s "https://ghcr.io/token?scope=repository:<yourgithubusername>/guestbook:pull&service=ghcr.io"
+   # {"token":"..."}                 -> public: the problem is elsewhere (check repoURL)
+   # {"errors":[{"code":"UNAUTHORIZED" -> private or missing: continue
+   ```
+
+2. Check that it exists, with your token (see step 0.2 for the full command).
+   If the tag list is empty or `NAME_UNKNOWN`, push the image (step 0.2) and
+   continue.
+
+3. Give Kargo access, either way:
+
+   * **Make the package public** (simplest for this demo): GitHub → your
+     profile → Packages → `guestbook` → Package settings → Change visibility →
+     Public. No image credentials needed.
+   * **Or keep it private** and create image credentials with a classic PAT
+     that has `read:packages`. The `--repo-url` must match the Warehouse
+     exactly (`ghcr.io/<yourgithubusername>/guestbook`, no `https://`, no tag):
+
+     ```shell
+     kargo get repo-credentials --project kargo-simple
+     kargo delete repo-credentials ghcr-creds --project kargo-simple   # if it exists but is wrong
+     kargo create repo-credentials ghcr-creds --project kargo-simple --image \
+       --username <yourgithubusername> --password "$GH_PAT" \
+       --repo-url ghcr.io/<yourgithubusername>/guestbook
+     ```
+
+4. Re-check:
+
+   ```shell
+   kargo refresh warehouse guestbook --project kargo-simple
+   kargo get freight --project kargo-simple
+   ```
+
+#### Debugging credentials (without the UI)
+
+Kargo stores each `repo-credentials` entry as a Secret in the Project
+namespace. These commands show the metadata and test the same credentials the
+way Kargo uses them, without printing the token.
+
+```shell
+# 1. What Kargo has (type, repoURL; the password is not shown)
+kargo get repo-credentials --project kargo-simple
+kubectl get secrets -n kargo-simple -L kargo.akuity.io/cred-type
+
+# 2. The exact repoURL and username stored (must match the Warehouse/task exactly)
+for c in github-creds ghcr-creds; do
+  echo "$c: $(kubectl get secret $c -n kargo-simple -o jsonpath='{.data.repoURL}' | base64 -d)" \
+       "user=$(kubectl get secret $c -n kargo-simple -o jsonpath='{.data.username}' | base64 -d)"
+done
+
+# 3. Replay the stored ghcr.io credentials (what the Warehouse does)
+U=$(kubectl get secret ghcr-creds -n kargo-simple -o jsonpath='{.data.username}' | base64 -d)
+P=$(kubectl get secret ghcr-creds -n kargo-simple -o jsonpath='{.data.password}' | base64 -d)
+curl -s -o /dev/null -w '%{http_code}\n' -u "$U:$P" \
+  "https://ghcr.io/token?scope=repository:<yourgithubusername>/guestbook:pull&service=ghcr.io"
+# 200 = credentials work; 401/403 = wrong token, fine-grained token, or missing read:packages
+
+# 4. Replay the stored GitHub credentials (what git-clone/git-push do)
+U=$(kubectl get secret github-creds -n kargo-simple -o jsonpath='{.data.username}' | base64 -d)
+P=$(kubectl get secret github-creds -n kargo-simple -o jsonpath='{.data.password}' | base64 -d)
+git ls-remote "https://$U:$P@github.com/<yourgithubusername>/kargo-simple.git" main >/dev/null \
+  && echo "git: OK" || echo "git: FAILED (token lacks repo scope, or wrong repo URL)"
+unset U P
+
+# 5. What the Warehouse itself reports
+kubectl get warehouse guestbook -n kargo-simple \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status}: {.message}{"\n"}{end}'
+
+# 6. Kargo controller logs (find the deployment names first)
+kubectl get deploy -n kargo
+kubectl logs -n kargo deploy/kargo-controller --since=15m | grep -iE 'guestbook|error'
+```
+
+To fix a credential: `kargo delete repo-credentials <name> --project kargo-simple`,
+create it again (step 4b), then `kargo refresh warehouse guestbook --project kargo-simple`.
+
+#### A Promotion to dev failed
+
+Auto-promotion starts a Promotion as soon as Freight exists. If credentials,
+the Argo CD Application or the smoke test were broken, that Promotion fails
+and stays failed; fixing the cause does not re-run it.
+
+Where to look:
+
+```shell
+kargo get promotions --project kargo-simple --stage dev      # phase: Succeeded / Failed / Errored
+kargo get promotion <promotion-name> --project kargo-simple -o yaml   # status.message names the failed step
+kargo get stages dev --project kargo-simple -o yaml            # status.conditions, current Freight, health
+kubectl get analysisruns -n kargo-simple                       # if the Promotion succeeded but verification failed
+kargo logs <analysisrun-name> --project kargo-simple
+```
+
+| Failed step / message | Usual cause | Fix |
+|---|---|---|
+| `git-clone`, `git-push`: authentication / 403 | `github-creds` missing, wrong `repoURL`, token without `repo` | Fix credentials (above) |
+| `git-clone`: commit or path not found, or `kustomize-set-image`: `could not find any Kustomization files in "./src/stages/dev"` | The Freight's commit of `main` on GitHub doesn't have the `stages/` layout (local changes not pushed) | Push `main` (step 2). The push creates new Freight and dev auto-promotes it; the old Freight keeps failing, ignore it |
+| `kustomize-build` | Broken overlay at that commit | Fix on `main`; that commit makes new Freight |
+| `argocd-update`: not authorized / not found | Application missing, or wrong `kargo.akuity.io/authorized-stage` annotation | `kubectl apply -R -f argocd/` (step 3) |
+| Promotion Succeeded, Stage unhealthy | Argo CD can't sync `stage/dev` (private repo, bad manifest) | Check the app in the Argo CD UI |
+| Verification Failed | Smoke test `curl` failed | See "When verification fails" |
+
+Ways to recover, after fixing the cause:
+
+```shell
+# Re-run: promote the newest Freight to dev, as auto-promotion would (also clears an auto-promotion hold)
+kargo promote --project kargo-simple --warehouse guestbook --stage dev
+
+# Or promote one specific Freight
+kargo get freight --project kargo-simple
+kargo promote --project kargo-simple --freight <freight-name> --stage dev
+
+# Abort a Promotion that is stuck Running (e.g. waiting on something that will never happen)
+kargo promote --project kargo-simple --name <promotion-name> --abort
+
+# Only verification failed: re-run it without promoting again
+kargo verify stage dev --project kargo-simple
+```
+
+### Tear down
+
+```shell
+kind delete cluster --name kargo-quickstart
+```
+
+This deletes Argo CD, Kargo, all Freight/Promotion history and the Kargo
+credentials. What stays: your fork, the `stage/*` branches, `versions/*.yaml`
+on `main`, and the ghcr.io images.
+
+Optional full reset of Git state (next promotions recreate them):
+
+```shell
+git push origin --delete stage/dev stage/staging stage/prod
+```
+
+### Bring it back
+
+Run steps 1–5 again (skip step 0). Re-export `GH_PAT` first in a new terminal.

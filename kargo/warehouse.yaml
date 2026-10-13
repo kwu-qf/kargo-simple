@@ -4,7 +4,24 @@ metadata:
   name: guestbook
   namespace: kargo-simple
 spec:
+  # Freight = image tag + commit of main.
   subscriptions:
-  - image:
+  # New image tags on ghcr.io (needs ghcr-creds if the package is private).
+  - name: guestbook-image
+    image:
       repoURL: ghcr.io/kwu-qf/guestbook
       imageSelectionStrategy: SemVer
+  # New commits on main that touch the CD manifests.
+  - name: gitops-config
+    git:
+      repoURL: https://github.com/kwu-qf/kargo-simple.git
+      branch: main
+      # Exact directory paths (use glob:/regex: prefixes for patterns).
+      # Kargo's own PRs touch only versions/, so they never create new Freight.
+      includePaths:
+      - argocd
+      - base
+      - components
+      - stages
+      excludePaths:
+      - versions

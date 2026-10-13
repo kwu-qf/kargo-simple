@@ -1,0 +1,5 @@
+# Replace the placeholder owners with your GitHub teams, e.g. @<org>/prod-owners.
+*                  @kwu-qf
+/stages/staging/   @kwu-qf   # staging owners
+/stages/prod/      @kwu-qf   # prod owners
+/versions/         @kwu-qf   # reviewers of Kargo promotion PRs

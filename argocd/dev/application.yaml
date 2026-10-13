@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kargo-simple-dev
+  namespace: argocd
+  annotations:
+    # Lets the Kargo Stage "dev" in Project "kargo-simple" update and sync this app.
+    kargo.akuity.io/authorized-stage: kargo-simple:dev
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/kwu-qf/kargo-simple.git
+    # Rendered YAML pushed by Kargo; created on the first promotion to dev.
+    targetRevision: stage/dev
+    path: .
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: guestbook-simple-dev
+  # No automated sync: Kargo's argocd-update step syncs to the promoted commit.
+  syncPolicy:
+    syncOptions:
+    - CreateNamespace=true

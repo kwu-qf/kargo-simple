@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guestbook-simple
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: guestbook-simple
+  template:
+    metadata:
+      labels:
+        app: guestbook-simple
+    spec:
+      containers:
+      # The tag is set by Kargo at render time (kustomize-set-image), never committed to main.
+      - image: ghcr.io/kwu-qf/guestbook:latest
+        name: guestbook-simple
+        ports:
+        - name: http
+          containerPort: 3000
+        envFrom:
+        - configMapRef:
+            name: guestbook-simple
+        # guestbook has no /healthz; /info returns 200 ("redis not enabled")
+        # without touching state, so it is used for probes and the smoke test.
+        readinessProbe:
+          httpGet: { path: /info, port: http }
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: { path: /info, port: http }
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests: { cpu: 50m, memory: 64Mi }
+          limits:   { cpu: 250m, memory: 128Mi }

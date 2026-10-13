@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# prod: env-specific values only. Written by people, via PR (CODEOWNERS: prod owners).
+# No image tag here: Kargo sets it at render time and pushes the result to stage/prod.
+
+resources:
+- ../../base
+- hpa.yaml
+- pdb.yaml
+
+namespace: guestbook-simple-prod
+
+replicas:
+- name: guestbook-simple
+  count: 4
+
+patches:
+- target: { kind: ConfigMap, name: guestbook-simple }
+  patch: |-
+    - op: replace
+      path: /data/APP_ENV
+      value: prod
+    - op: replace
+      path: /data/LOG_LEVEL
+      value: warn
+- target: { kind: Deployment, name: guestbook-simple }
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/resources
+      value:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits:   { cpu: 500m, memory: 256Mi }
+- target: { kind: Service, name: guestbook-simple }
+  patch: |-
+    # NodePort 32082 is mapped to localhost:32082 by the kind quickstart cluster
+    - op: replace
+      path: /spec/type
+      value: NodePort
+    - op: add
+      path: /spec/ports/0/nodePort
+      value: 32082

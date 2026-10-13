@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guestbook-simple
+data:
+  APP_ENV: base
+  LOG_LEVEL: info

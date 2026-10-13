@@ -7,72 +7,96 @@ spec:
   vars:
   - name: repoURL
     value: https://github.com/kwu-qf/kargo-simple.git
-  - name: branch
-    value: main
   - name: image
     value: ghcr.io/kwu-qf/guestbook
-  - name: openpr
+  # "true": record the promotion in versions/<stage>.yaml via a PR on main and
+  # deploy only after it merges. "false": deploy directly (dev).
+  - name: approval
     value: "false"
   steps:
-  # Clone the Git repository that contains the Kustomize configuration
-  # to the ./src directory.
+  # Check out the Freight's commit of main (never the latest main), the
+  # rendered branch stage/<stage>, and main itself for the version record.
   - uses: git-clone
     config:
       repoURL: ${{ vars.repoURL }}
       checkout:
-      - branch: ${{ vars.branch }}
+      - commit: ${{ commitFrom(vars.repoURL).ID }}
         path: ./src
-  # Update the image in the Kustomize configuration located at ./env/<stage>
-  # in the repository.
-  - uses: kustomize-set-image
-    as: update-image
+      - branch: stage/${{ ctx.stage }}
+        create: true
+        path: ./out
+      - branch: main
+        path: ./main
+  - uses: git-clear
     config:
-      path: ./src/env/${{ ctx.stage }}
+      path: ./out
+  # Set the image tag locally only; it is never committed to main.
+  - uses: kustomize-set-image
+    config:
+      path: ./src/stages/${{ ctx.stage }}
       images:
       - image: ${{ vars.image }}
-        tag: ${{ imageFrom( vars.image ).Tag }}
-  # Commit the changes to the Git repository.
+        tag: ${{ imageFrom(vars.image).Tag }}
+  - uses: kustomize-build
+    config:
+      path: ./src/stages/${{ ctx.stage }}
+      outPath: ./out
+
+  # --- approval gate: one PR on main changing versions/<stage>.yaml ---------
+  - uses: yaml-update
+    if: ${{ vars.approval == 'true' }}
+    config:
+      path: ./main/versions/${{ ctx.stage }}.yaml
+      updates:
+      - key: freight
+        value: ${{ ctx.targetFreight.name }}
+      - key: image
+        value: ${{ vars.image }}
+      - key: tag
+        value: ${{ imageFrom(vars.image).Tag }}
+      - key: configCommit
+        value: ${{ commitFrom(vars.repoURL).ID }}
+  - uses: git-commit
+    if: ${{ vars.approval == 'true' }}
+    config:
+      path: ./main
+      message: "[${{ ctx.stage }}] promote ${{ imageFrom(vars.image).Tag }} @ ${{ commitFrom(vars.repoURL).ID }}"
+  - uses: git-push
+    if: ${{ vars.approval == 'true' }}
+    as: pushRecord
+    config:
+      path: ./main
+      generateTargetBranch: true
+  - uses: git-open-pr
+    if: ${{ vars.approval == 'true' }}
+    as: openPR
+    config:
+      repoURL: ${{ vars.repoURL }}
+      sourceBranch: ${{ task.outputs.pushRecord.branch }}
+      targetBranch: main
+      title: "Promote to ${{ ctx.stage }}: ${{ imageFrom(vars.image).Tag }}"
+  # A rejected or closed PR fails the Promotion here: nothing is pushed or deployed.
+  - uses: git-wait-for-pr
+    if: ${{ vars.approval == 'true' }}
+    config:
+      repoURL: ${{ vars.repoURL }}
+      prNumber: ${{ task.outputs.openPR.pr.id }}
+
+  # --- deploy: push rendered YAML to stage/<stage> -----------------------------
   - uses: git-commit
     as: commit
     config:
-      path: ./src
-      message: ${{ task.outputs['update-image'].commitMessage }}
-  # Push the changes to the Git repository.
+      path: ./out
+      message: "[${{ ctx.stage }}] ${{ imageFrom(vars.image).Tag }} @ ${{ commitFrom(vars.repoURL).ID }}"
   - uses: git-push
-    if: ${{ vars.openpr != 'true' }}
     config:
-      path: ./src
+      path: ./out
 
-  # Push the changes to a newly created branch in the Git repository.
-  - uses: git-push
-    if: ${{ vars.openpr == 'true' }}
-    as: push
+  # Sync the Argo CD Application for this Stage to the commit just pushed.
+  - uses: argocd-update
     config:
-      path: ./src
-      generateTargetBranch: true
-  # Open a pull request to merge the changes into the main branch.
-  - uses: git-open-pr
-    as: open-pr
-    if: ${{ vars.openpr == 'true' }}
-    config:
-      repoURL: ${{ vars.repoURL }}
-      createTargetBranch: true
-      sourceBranch: ${{ task.outputs.push.branch }}
-      targetBranch: ${{ vars.branch }}
-  # Wait for the pull request to be merged.
-  - uses: git-wait-for-pr
-    as: wait-for-pr
-    if: ${{ vars.openpr == 'true' }}
-    config:
-      repoURL: ${{ vars.repoURL }}
-      prNumber: ${{ task.outputs['open-pr'].prNumber }}
-
-  # If you have an Argo CD Application that should be synced after the Git
-  # repository is updated, uncomment the following lines and specify the
-  # app name.
-  # - uses: argocd-update
-  #   config:
-  #     apps:
-  #     - name: guestbook-${{ ctx.stage }}
-  #       sources:
-  #       - repoURL: ${{ vars.repoURL }}
+      apps:
+      - name: kargo-simple-${{ ctx.stage }}
+        sources:
+        - repoURL: ${{ vars.repoURL }}
+          desiredRevision: ${{ task.outputs.commit.commit }}

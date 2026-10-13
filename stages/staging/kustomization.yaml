@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# staging: env-specific values only. Written by people, via PR (CODEOWNERS: staging owners).
+# No image tag here: Kargo sets it at render time and pushes the result to stage/staging.
+
+resources:
+- ../../base
+
+namespace: guestbook-simple-staging
+
+replicas:
+- name: guestbook-simple
+  count: 2
+
+patches:
+- target: { kind: ConfigMap, name: guestbook-simple }
+  patch: |-
+    - op: replace
+      path: /data/APP_ENV
+      value: staging
+- target: { kind: Service, name: guestbook-simple }
+  patch: |-
+    # NodePort 32081 is mapped to localhost:32081 by the kind quickstart cluster
+    - op: replace
+      path: /spec/type
+      value: NodePort
+    - op: add
+      path: /spec/ports/0/nodePort
+      value: 32081

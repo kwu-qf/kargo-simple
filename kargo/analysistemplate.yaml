@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  # Runs as Stage verification, after the Promotion succeeds and the Argo CD
+  # Application is Healthy. Requires Argo Rollouts (installed by kind.sh).
+  name: smoke-test
+  namespace: kargo-simple
+spec:
+  args:
+  - name: namespace           # app namespace, e.g. guestbook-simple-dev
+  - name: path                # HTTP path to check
+    value: /info
+  metrics:
+  - name: http-check
+    provider:
+      job:
+        spec:
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+              - name: curl
+                image: curlimages/curl:8.11.1
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities: { drop: ["ALL"] }
+                # -f: fail on HTTP >= 400. Retries cover pods that are still starting.
+                command:
+                - sh
+                - -c
+                - >-
+                  curl -fsS --max-time 5
+                  --retry 5 --retry-delay 5 --retry-connrefused --retry-all-errors
+                  "http://guestbook-simple.{{args.namespace}}.svc.cluster.local{{args.path}}"
+                  && echo " <- {{args.path}} OK"

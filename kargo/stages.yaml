@@ -17,6 +17,14 @@ spec:
       steps:
       - task:
           name: promote
+  # Smoke test after deploy. Only Freight that passes is verified and can
+  # move to the next Stage.
+  verification:
+    analysisTemplates:
+    - name: smoke-test
+    args:
+    - name: namespace
+      value: guestbook-simple-dev
 
 ---
 apiVersion: kargo.akuity.io/v1alpha1
@@ -39,6 +47,17 @@ spec:
       steps:
       - task:
           name: promote
+        vars:
+        - name: approval
+          value: "true"
+  # Smoke test after deploy. Only Freight that passes is verified and can
+  # move to the next Stage.
+  verification:
+    analysisTemplates:
+    - name: smoke-test
+    args:
+    - name: namespace
+      value: guestbook-simple-staging
 
 ---
 apiVersion: kargo.akuity.io/v1alpha1
@@ -62,5 +81,13 @@ spec:
       - task:
           name: promote
         vars:
-        - name: openpr
+        - name: approval
           value: "true"
+  # Smoke test after deploy. Only Freight that passes is verified and can
+  # move to the next Stage.
+  verification:
+    analysisTemplates:
+    - name: smoke-test
+    args:
+    - name: namespace
+      value: guestbook-simple-prod
