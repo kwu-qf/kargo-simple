@@ -1,0 +1,8 @@
+apiVersion: v1
+data:
+  APP_ENV: dev
+  LOG_LEVEL: debug
+kind: ConfigMap
+metadata:
+  name: guestbook-simple
+  namespace: guestbook-simple-dev
