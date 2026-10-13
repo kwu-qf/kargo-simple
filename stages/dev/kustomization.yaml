@@ -21,7 +21,7 @@ patches:
       value: dev
     - op: replace
       path: /data/LOG_LEVEL
-      value: debug
+      value: info
 - target: { kind: Service, name: guestbook-simple }
   patch: |-
     # NodePort 32080 is mapped to localhost:32080 by the kind quickstart cluster

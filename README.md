@@ -326,6 +326,53 @@ See [Viewing verification results and logs](#viewing-verification-results-and-lo
 
 ![promotion](docs/promotion.gif)
 
+### After merging a staging/prod PR
+
+The staging/prod Promotion sits in the `git-wait-for-pr` step, phase
+**Running**, until the PR is **merged**. Approving the PR is not enough;
+closing it without merging fails the Promotion (nothing is deployed).
+
+Kargo checks the PR every **10s** (`pollInterval` in
+`kargo/promotiontask.yaml`; Kargo's default is 30s and the minimum is 10s).
+For an immediate pickup, set up the GitHub webhook with **Pull requests**
+events (see [Later: instant Freight detection with webhooks](#later-instant-freight-detection-with-webhooks)).
+
+Where to see it:
+
+```shell
+# Phase and the step it is on
+kargo get promotions --project kargo-simple --stage staging
+kargo get promotion <promotion-name> --project kargo-simple -o yaml | grep -A40 '^status:'
+# status.currentStep: index of the running step (git-wait-for-pr while the PR is open)
+# status.stepExecutionMetadata: per-step status, startedAt/finishedAt, error messages
+# status.phase: Running -> Succeeded after the merge
+
+# Watch it move
+kubectl get promotions -n kargo-simple -w
+
+# Controller logs for that Promotion
+kubectl get deploy -n kargo
+kubectl logs -n kargo deploy/kargo-controller -f | grep <promotion-name>
+```
+
+The Kargo UI shows the same per-step view: Stage `staging` → Promotions → the
+Promotion → steps.
+
+The controller does not necessarily log every PR check at the default `INFO`
+level. To see each poll, raise the controller log level (`ERROR`, `INFO`,
+`DEBUG`, `TRACE`), and set it back afterwards:
+
+```shell
+helm upgrade kargo oci://ghcr.io/akuity/kargo-charts/kargo -n kargo \
+  --version 1.12.4 --reuse-values --set controller.logLevel=DEBUG
+# back to normal
+helm upgrade kargo oci://ghcr.io/akuity/kargo-charts/kargo -n kargo \
+  --version 1.12.4 --reuse-values --set controller.logLevel=INFO
+```
+
+After the merge, the remaining steps run (push `stage/staging`, sync
+`kargo-simple-staging`), then the staging smoke test starts.
+
 ### Viewing verification results and logs
 
 Each verification is an Argo Rollouts **AnalysisRun** in the `kargo-simple`

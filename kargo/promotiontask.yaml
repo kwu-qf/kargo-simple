@@ -81,6 +81,9 @@ spec:
     config:
       repoURL: ${{ vars.repoURL }}
       prNumber: ${{ task.outputs.openPR.pr.id }}
+      # How often Kargo checks whether the PR was merged (default 30s, minimum 10s).
+      # A GitHub webhook (pull_request closed) makes it immediate.
+      pollInterval: 10s
 
   # --- deploy: push rendered YAML to stage/<stage> -----------------------------
   - uses: git-commit
