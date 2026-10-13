@@ -18,7 +18,7 @@ spec:
       - envFrom:
         - configMapRef:
             name: guestbook-simple
-        image: ghcr.io/kwu-qf/guestbook:v0.0.1
+        image: ghcr.io/kwu-qf/guestbook:v0.0.2
         livenessProbe:
           httpGet:
             path: /info
