@@ -318,12 +318,66 @@ After each deploy, the Stage runs the `smoke-test` verification (a `curl`
 Job). Only Freight that passes is verified and can be promoted to the next
 Stage.
 
-```shell
-kubectl get analysisruns -n kargo-simple                # Successful / Failed
-kargo logs <analysisrun-name> --project kargo-simple    # curl output
-```
+See [Viewing verification results and logs](#viewing-verification-results-and-logs).
 
 ![promotion](docs/promotion.gif)
+
+### Viewing verification results and logs
+
+Each verification is an Argo Rollouts **AnalysisRun** in the `kargo-simple`
+namespace. Its `http-check` metric runs a Kubernetes **Job** (the `curl` pod)
+in the same namespace.
+
+**1. Result (pass/fail)**
+
+```shell
+kargo get stages dev --project kargo-simple -o yaml | grep -A8 verification   # current Freight's verification
+kubectl get analysisruns -n kargo-simple --sort-by=.metadata.creationTimestamp
+# PHASE: Running / Successful / Failed / Error
+
+kubectl get analysisrun <analysisrun-name> -n kargo-simple \
+  -o jsonpath='{.status.phase}{"\n"}{range .status.metricResults[*]}{.name}: {.phase} {.message}{"\n"}{range .measurements[*]}  {.phase} {.message}{"\n"}{end}{end}'
+```
+
+**2. curl output (Job pod logs)**
+
+```shell
+kubectl get jobs -n kargo-simple --sort-by=.metadata.creationTimestamp
+kubectl logs -n kargo-simple job/<job-name>
+# success: "redis not enabled <- /info OK"
+# failure: curl: (22) ... or curl: (7) Failed to connect ...
+
+# or follow the newest Job's pod while it runs
+kubectl logs -n kargo-simple -f \
+  $(kubectl get pods -n kargo-simple -l job-name -o name --sort-by=.metadata.creationTimestamp | tail -1)
+
+kubectl describe analysisrun <analysisrun-name> -n kargo-simple   # events, if the Job never started
+```
+
+The Job and its pod are kept with the AnalysisRun, so the logs stay available
+until Kargo cleans up old AnalysisRuns.
+
+**3. Kargo UI / `kargo logs`**
+
+The UI's log view and `kargo logs <analysisrun-name>` show
+**"AnalysisRun log streaming is not configured"** on this setup. That is
+expected: Kargo does not read pod logs directly. It fetches them over HTTP from
+a central log store that you configure in the Kargo Helm values
+(`api.rollouts.logs.enabled`, `urlTemplate`, optional `tokenSecret`). The
+quickstart cluster has no log store, so use `kubectl logs` (above). The
+verification itself still runs and its pass/fail status is shown in the UI.
+
+To enable it later: forward pod logs to a store reachable by HTTP GET (for
+example Loki, or your platform's logging), then set, for example:
+
+```yaml
+api:
+  rollouts:
+    integrationEnabled: true
+    logs:
+      enabled: true
+      urlTemplate: https://logs.example.com/${{project}}/${{analysisRun}}/${{jobName}}/${{container}}
+```
 
 ### When verification fails
 
@@ -332,7 +386,7 @@ is not verified, so it cannot move to the next Stage.
 
 | Option | Command |
 |---|---|
-| Read the curl output | `kargo logs <analysisrun-name> --project kargo-simple` |
+| Read the curl output | `kubectl logs -n kargo-simple job/<job-name>` (see [Viewing verification results and logs](#viewing-verification-results-and-logs)) |
 | Re-run (flaky check, or after fixing the cluster) | `kargo verify stage dev --project kargo-simple` |
 | Roll back: promote the last good Freight. On `dev` this places an auto-promotion hold, so the bad Freight is not promoted again | `kargo promote --project kargo-simple --freight <good-freight> --stage dev` |
 | Resume auto-promotion on `dev` after a fix | `kargo promote --project kargo-simple --warehouse guestbook --stage dev` |
@@ -351,6 +405,61 @@ kargo refresh warehouse guestbook --project kargo-simple
 A config change merged to `argocd/`, `base/`, `components/` or `stages/` on
 `main` also creates new Freight. Either way, dev is promoted automatically;
 staging needs a manual promotion and a merged PR.
+
+### Later: instant Freight detection with webhooks
+
+Not set up yet. Today the Warehouse **polls** ghcr.io and `main` on a
+system-wide interval (a few minutes); `kargo refresh warehouse guestbook` only
+skips the wait. `spec.interval` on the Warehouse can make polling slower, not
+faster than the system minimum.
+
+With a GitHub webhook receiver, GitHub notifies Kargo and the Warehouse
+refreshes within seconds:
+
+| GitHub event | Effect |
+|---|---|
+| `push` to `main` touching `argocd/`, `base/`, `components/`, `stages/` | New Freight right away (path filters apply) |
+| `package` (new ghcr.io version) | New Freight right away |
+| `pull_request` closed (merged) | A staging/prod Promotion waiting in `git-wait-for-pr` continues right away |
+
+Steps to try it:
+
+1. Create the signing secret (not in Git):
+
+   ```shell
+   WH_SECRET=$(openssl rand -hex 32); echo "$WH_SECRET"   # keep it for step 4
+   kargo create generic-credentials gh-wh-secret --project kargo-simple --set secret="$WH_SECRET"
+   ```
+
+2. Add the receiver to `kargo/projectconfig.yaml`, commit, push, `kargo apply -f kargo/`:
+
+   ```yaml
+   spec:
+     webhookReceivers:
+     - name: github
+       github:
+         secretRef:
+           name: gh-wh-secret
+   ```
+
+3. Expose Kargo's webhook server to GitHub. On kind it is only at
+   `localhost:31082`, so use a tunnel, for example
+   `cloudflared tunnel --url http://localhost:31082` or `ngrok http 31082`.
+   This makes the endpoint public (requests are signature-checked); stop the
+   tunnel when done. On EKS, use the internal ALB instead.
+
+4. Get the receiver path and add the webhook in GitHub:
+
+   ```shell
+   kubectl get projectconfigs kargo-simple -n kargo-simple -o jsonpath='{.status.webhookReceivers}'
+   ```
+
+   Repo → Settings → Webhooks → Add webhook: payload URL = tunnel URL + the
+   receiver path, content type `application/json`, secret = `$WH_SECRET`,
+   events: **Pushes**, **Packages**, **Pull requests**. Check that the ping
+   under Recent Deliveries returns 200.
+
+Reference: https://docs.kargo.io/user-guide/reference-docs/webhook-receivers/github
 
 ### Troubleshooting
 
@@ -452,7 +561,7 @@ kargo get promotions --project kargo-simple --stage dev      # phase: Succeeded 
 kargo get promotion <promotion-name> --project kargo-simple -o yaml   # status.message names the failed step
 kargo get stages dev --project kargo-simple -o yaml            # status.conditions, current Freight, health
 kubectl get analysisruns -n kargo-simple                       # if the Promotion succeeded but verification failed
-kargo logs <analysisrun-name> --project kargo-simple
+kubectl logs -n kargo-simple job/<job-name>                    # curl output (kubectl get jobs -n kargo-simple)
 ```
 
 | Failed step / message | Usual cause | Fix |
@@ -496,6 +605,18 @@ If `ghcr-pull` exists but the pull still fails, check that the token in it has
 `read:packages`:
 `kubectl get secret ghcr-pull -n guestbook-simple-dev -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d | head -c 80`
 (shows the registry and username; don't share the output).
+
+#### Verification: `container has runAsNonRoot and image has non-numeric user (curl_user)`
+
+The smoke-test pod runs with `runAsNonRoot: true`, and the `curlimages/curl`
+image names its user instead of giving a UID, so Kubernetes refuses to start
+it. `kargo/analysistemplate.yaml` sets `runAsUser: 100` / `runAsGroup: 101`
+(curl_user). After changing the template, re-apply and re-run:
+
+```shell
+kubectl apply -f kargo/analysistemplate.yaml
+kargo verify stage dev --project kargo-simple
+```
 
 ### Tear down
 

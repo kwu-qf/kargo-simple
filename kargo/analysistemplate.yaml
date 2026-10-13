@@ -21,6 +21,10 @@ spec:
               restartPolicy: Never
               securityContext:
                 runAsNonRoot: true
+                # The image's USER is a name (curl_user), which runAsNonRoot
+                # can't verify; set its numeric UID/GID explicitly.
+                runAsUser: 100
+                runAsGroup: 101
                 seccompProfile:
                   type: RuntimeDefault
               containers:
