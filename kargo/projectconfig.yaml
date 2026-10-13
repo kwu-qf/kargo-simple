@@ -10,5 +10,10 @@ spec:
   - stageSelector:
       name: dev
     autoPromotionEnabled: true
-  # staging and prod are promoted by hand; each Promotion opens a PR on main
-  # (versions/<stage>.yaml) and deploys only after that PR merges.
+  # staging: Freight that passes dev verification is promoted automatically.
+  # The Promotion opens a PR on main (versions/staging.yaml) and deploys only
+  # after that PR merges; closing the PR cancels it.
+  - stageSelector:
+      name: staging
+    autoPromotionEnabled: true
+  # prod is promoted by hand (same PR gate).

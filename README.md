@@ -9,7 +9,8 @@ This is a GitOps repository of a simple Kargo example for getting started.
 * Three Stage (dev, staging, prod) deploy pipeline
 * Each Stage renders its own overlay at the Freight's commit and pushes the
   rendered YAML to a `stage/<stage>` branch
-* dev deploys directly
+* dev is auto-promoted and deploys directly
+* staging is auto-promoted after dev verification; prod is promoted by hand
 * staging and prod deploy only after a Kargo PR on `main` that updates
   `versions/<stage>.yaml` is approved and merged
 
@@ -220,7 +221,7 @@ Kargo runs in the cluster from step 1. This step loads the pipeline into it.
 | File | Creates | Purpose |
 |---|---|---|
 | `kargo/project.yaml` | Project `kargo-simple` | Namespace that holds everything below |
-| `kargo/projectconfig.yaml` | ProjectConfig `kargo-simple` | Auto-promotion for `dev` |
+| `kargo/projectconfig.yaml` | ProjectConfig `kargo-simple` | Auto-promotion for `dev` and `staging` (prod is manual) |
 | `kargo/warehouse.yaml` | Warehouse `guestbook` | Watches ghcr.io tags and `main` (`argocd`, `base`, `components`, `stages`) and creates Freight |
 | `kargo/promotiontask.yaml` | PromotionTask `promote` | Renders `stages/<stage>`, opens the `versions/<stage>.yaml` PR (staging, prod), pushes `stage/<stage>`, syncs the Argo CD app |
 | `kargo/stages.yaml` | Stages `dev`, `staging`, `prod` | The pipeline dev → staging → prod, each with a smoke-test verification |
@@ -310,9 +311,12 @@ kargo delete project kargo-simple     # deletes everything in the Project, inclu
   promoted to dev: Kargo renders `stages/dev`, pushes `stage/dev` and syncs
   `kargo-simple-dev`. Open http://localhost:32080. Watch it with
   `kargo get promotions --project kargo-simple`.
-* **staging / prod**: promote the same way. Kargo opens a PR on `main`
-  updating `versions/<stage>.yaml`. Merge it to deploy; close it to cancel.
-  Then open http://localhost:32081 or :32082.
+* **staging**: automatic once the Freight passes dev verification. Kargo
+  opens a PR on `main` updating `versions/staging.yaml` and waits. Merge it to
+  deploy; close it to cancel. Then open http://localhost:32081.
+* **prod**: manual. Promote the staging-verified Freight in the UI (or
+  `kargo promote --project kargo-simple --freight <freight> --stage prod`).
+  Kargo opens the prod PR the same way. Then open http://localhost:32082.
 
 After each deploy, the Stage runs the `smoke-test` verification (a `curl`
 Job). Only Freight that passes is verified and can be promoted to the next
@@ -404,7 +408,7 @@ kargo refresh warehouse guestbook --project kargo-simple
 
 A config change merged to `argocd/`, `base/`, `components/` or `stages/` on
 `main` also creates new Freight. Either way, dev is promoted automatically;
-staging needs a manual promotion and a merged PR.
+staging is promoted automatically after dev verification and waits for its PR to be merged; prod is manual.
 
 ### Later: instant Freight detection with webhooks
 
@@ -605,6 +609,23 @@ If `ghcr-pull` exists but the pull still fails, check that the token in it has
 `read:packages`:
 `kubectl get secret ghcr-pull -n guestbook-simple-dev -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d | head -c 80`
 (shows the registry and username; don't share the output).
+
+#### Staging PR doesn't open after dev verification passes
+
+Staging needs auto-promotion in `kargo/projectconfig.yaml`. Check and apply:
+
+```shell
+kargo get projectconfig --project kargo-simple -o yaml | grep -A3 stageSelector
+kargo apply -f kargo/projectconfig.yaml
+kargo get promotions --project kargo-simple --stage staging    # should show a Running Promotion
+```
+
+To start it by hand instead: `kargo promote --project kargo-simple --freight <freight> --stage staging`
+(or `--downstream-from dev`). A staging Promotion stays **Running** while its
+PR is open; that is normal.
+
+If the Promotion fails at `git-open-pr`, the `github-creds` token can't open
+PRs (needs `repo` scope).
 
 #### Verification: `container has runAsNonRoot and image has non-numeric user (curl_user)`
 
