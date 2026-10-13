@@ -189,6 +189,30 @@ Each Application shows an error until its first promotion: Kargo creates the
 `stage/<stage>` branch it points at. If the repo is private, also add it in
 Argo CD (Settings → Repositories) with the PAT.
 
+### 3b. Image pull secret (only if the guestbook package is private)
+
+Kargo's `ghcr-creds` only lets Kargo list tags. The cluster pulls the image
+itself and needs its own credentials in each app namespace, or pods fail with
+`ErrImagePull ... failed to fetch anonymous token ... 401 Unauthorized`.
+Skip this step if the package is public.
+
+```shell
+export GH_PAT=ghp_xxx    # classic PAT with read:packages
+for ns in guestbook-simple-dev guestbook-simple-staging guestbook-simple-prod; do
+  kubectl create namespace $ns --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create secret docker-registry ghcr-pull -n $ns \
+    --docker-server=ghcr.io \
+    --docker-username=<yourgithubusername> \
+    --docker-password="$GH_PAT" \
+    --dry-run=client -o yaml | kubectl apply -f -
+done
+```
+
+`base/deployment.yaml` references `ghcr-pull` through `imagePullSecrets`. The
+Secret is not in Git and Argo CD doesn't manage it, so it is lost on teardown;
+re-run this step when you bring the cluster back. (In a real cluster, create it
+with External Secrets instead.)
+
 ### 4. Deploy Kargo (`kargo/`)
 
 Kargo runs in the cluster from step 1. This step loads the pipeline into it.
@@ -456,6 +480,22 @@ kargo promote --project kargo-simple --name <promotion-name> --abort
 # Only verification failed: re-run it without promoting again
 kargo verify stage dev --project kargo-simple
 ```
+
+#### Pod: `ErrImagePull ... failed to fetch anonymous token ... 401 Unauthorized`
+
+The image is private and the namespace has no pull secret. Either make the
+package public, or create `ghcr-pull` (step 3b). Then restart the pods instead
+of waiting for the pull back-off:
+
+```shell
+kubectl rollout restart deployment/guestbook-simple -n guestbook-simple-dev
+kubectl get pods -n guestbook-simple-dev -w
+```
+
+If `ghcr-pull` exists but the pull still fails, check that the token in it has
+`read:packages`:
+`kubectl get secret ghcr-pull -n guestbook-simple-dev -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d | head -c 80`
+(shows the registry and username; don't share the output).
 
 ### Tear down
 

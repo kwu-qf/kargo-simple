@@ -13,6 +13,11 @@ spec:
       labels:
         app: guestbook-simple
     spec:
+      # Pull secret for a private ghcr.io package. Created per namespace by hand
+      # (README step 3b), never committed. If it doesn't exist, the pull is
+      # anonymous, which works for a public package.
+      imagePullSecrets:
+      - name: ghcr-pull
       containers:
       # The tag is set by Kargo at render time (kustomize-set-image), never committed to main.
       - image: ghcr.io/kwu-qf/guestbook:latest
