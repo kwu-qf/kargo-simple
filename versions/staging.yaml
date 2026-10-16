@@ -1,11 +1,11 @@
 # Kargo's record of what was approved for staging.
 # Changed only through Kargo promotion PRs. Do not edit by hand.
-freight: ce8e911d9ba8e0c1a69c5b912f8787f42ebbcc4c   # Kargo Freight name
-version: ""          # release/version.yaml at configCommit
-configCommit: a640d14c61179cbe36d50a94b708532c3af196a4   # commit of main that was rendered
+freight: 8cd3ec281e4a091f175a24598ba9e76d39b76a04
+version: v0.1.0
+configCommit: cccb02a2a90c6b207662063dd9501fd2ce753d85
 images:
   guestbook:
     image: ghcr.io/kwu-qf/guestbook
-    tag: v0.0.3
+    tag: v0.0.4
 # Planned name; staging-rc creates the tag after staging verification passes.
-rcTag: ""
+rcTag: rc-v0.1.0-cccb02a-incendiary-waterbuffalo-8cd3ec2
