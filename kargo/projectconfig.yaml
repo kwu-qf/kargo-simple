@@ -16,8 +16,14 @@ spec:
   - stageSelector:
       name: staging
     autoPromotionEnabled: true
+  # staging-rc: Freight that passes staging verification is tagged
+  # rc-<version>-<shortSHA>-<alias>-<freightShort> automatically. Only tagged Freight can go to prod.
+  - stageSelector:
+      name: staging-rc
+    autoPromotionEnabled: true
   # prod is promoted by hand (same PR gate).
-  # prod-release: Freight that passes prod verification is tagged automatically.
+  # prod-release: Freight that passes prod verification is tagged
+  # rel-<version>-<freightShort> automatically.
   - stageSelector:
       name: prod-release
     autoPromotionEnabled: true

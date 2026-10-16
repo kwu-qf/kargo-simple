@@ -18,10 +18,12 @@ spec:
       branch: main
       # Exact directory paths (use glob:/regex: prefixes for patterns).
       # Kargo's own PRs touch only versions/, so they never create new Freight.
+      # release: bumping release/version.yaml creates Freight with the new version.
       includePaths:
       - argocd
       - base
       - components
+      - release
       - stages
       excludePaths:
       - versions

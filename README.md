@@ -13,6 +13,11 @@ This is a GitOps repository of a simple Kargo example for getting started.
 * staging is auto-promoted after dev verification; prod is promoted by hand
 * staging and prod deploy only after a Kargo PR on `main` that updates
   `versions/<stage>.yaml` is approved and merged
+* A release version in `release/version.yaml`, bumped by people through a PR
+* Two tag-only Stages that deploy nothing: `staging-rc` tags staging-verified
+  Freight `rc-<version>-<shortSHA>-<alias>-<freightShort>` (prod only accepts Freight
+  from it), and `prod-release` tags prod-verified Freight
+  `rel-<version>-<freightShort>`
 
 Each Stage is deployed by an Argo CD Application in `argocd/<stage>/` that
 tracks the root of the `stage/<stage>` branch. Kargo's `argocd-update` step
@@ -32,6 +37,8 @@ main (protected, PRs only)
 │   ├── service.yaml
 │   └── kustomization.yaml
 ├── components/      # optional shared, opt-in features
+├── release/
+│   └── version.yaml # release version; people bump it via PR
 ├── stages/          # env-specific values only; written by people
 │   ├── dev/         # replicas: 1, debug logging
 │   ├── staging/     # replicas: 2
@@ -52,6 +59,7 @@ stage/dev  stage/staging  stage/prod   # rendered YAML; only Kargo pushes
 |---|---|---|---|
 | `base/`, `components/` | What every environment runs | People, via PR | Yes |
 | `stages/<stage>/` | How this environment differs | People, via PR | Yes |
+| `release/version.yaml` | Which release version `main` is building | People, via PR | Yes |
 | `versions/<stage>.yaml` | Which version was approved for this environment | Kargo, via PR | No |
 | `argocd/<stage>/` | Which Argo CD Application deploys this environment | People, via PR | Yes |
 | `stage/<stage>` branch | Exactly what was deployed | Kargo | No (overwritten each promotion) |
@@ -59,8 +67,16 @@ stage/dev  stage/staging  stage/prod   # rendered YAML; only Kargo pushes
 Image tags are never committed to `main`: Kargo sets the tag at render time.
 The `stage/<stage>` branches are created by Kargo on the first promotion.
 
-The Warehouse watches `argocd/`, `base/`, `components/` and `stages/` on `main` and
-excludes `versions/`, so merging a Kargo PR never creates new Freight.
+The Warehouse watches `argocd/`, `base/`, `components/`, `release/` and `stages/`
+on `main` and excludes `versions/`, so merging a Kargo PR never creates new Freight.
+
+`versions/<stage>.yaml` records the Freight, `version`, `configCommit`, the
+image tag of each service under `images:`, and the git tag names: `rcTag`
+(staging and prod) and `releaseTag` (prod only). Kargo writes the tag names in
+the promotion PR, before the tag Stages create them, so a name in the record
+whose verification later failed has no matching tag. Together with the tag
+messages, this keeps every Freight resolvable from git after its Kargo object
+is gone.
 
 ### Branch protection
 
@@ -221,10 +237,10 @@ Kargo runs in the cluster from step 1. This step loads the pipeline into it.
 | File | Creates | Purpose |
 |---|---|---|
 | `kargo/project.yaml` | Project `kargo-simple` | Namespace that holds everything below |
-| `kargo/projectconfig.yaml` | ProjectConfig `kargo-simple` | Auto-promotion for `dev` and `staging` (prod is manual) |
-| `kargo/warehouse.yaml` | Warehouse `guestbook` | Watches ghcr.io tags and `main` (`argocd`, `base`, `components`, `stages`) and creates Freight |
-| `kargo/promotiontask.yaml` | PromotionTask `promote` | Renders `stages/<stage>`, opens the `versions/<stage>.yaml` PR (staging, prod), pushes `stage/<stage>`, syncs the Argo CD app |
-| `kargo/stages.yaml` | Stages `dev`, `staging`, `prod` | The pipeline dev → staging → prod, each with a smoke-test verification |
+| `kargo/projectconfig.yaml` | ProjectConfig `kargo-simple` | Auto-promotion for `dev`, `staging`, `staging-rc` and `prod-release` (prod is manual) |
+| `kargo/warehouse.yaml` | Warehouse `guestbook` | Watches ghcr.io tags and `main` (`argocd`, `base`, `components`, `release`, `stages`) and creates Freight |
+| `kargo/promotiontask.yaml` | PromotionTask `promote` | Renders `stages/<stage>`, opens the `versions/<stage>.yaml` PR (staging, prod) with the version, image tags and planned git tag names, pushes `stage/<stage>`, syncs the Argo CD app |
+| `kargo/stages.yaml` | Stages `dev`, `staging`, `staging-rc`, `prod`, `prod-release` | The pipeline dev → staging → staging-rc → prod → prod-release. dev, staging and prod deploy and run a smoke-test verification; `staging-rc` and `prod-release` only push the `rc-`/`rel-` git tags |
 | `kargo/analysistemplate.yaml` | AnalysisTemplate `smoke-test` | `curl` to `http://guestbook-simple.<namespace>.svc.cluster.local/info` after each deploy |
 
 Prerequisites: steps 2 and 3 are done (`main` on GitHub has this layout and the
@@ -275,7 +291,7 @@ Re-applying the whole folder is safe; `project.yaml` is unchanged.
 ```shell
 kargo get projectconfig --project kargo-simple
 kargo get warehouses --project kargo-simple
-kargo get stages --project kargo-simple                 # dev, staging, prod
+kargo get stages --project kargo-simple                 # dev, staging, staging-rc, prod, prod-release
 kubectl get promotiontasks -n kargo-simple              # promote
 kubectl get analysistemplates -n kargo-simple           # smoke-test
 kargo refresh warehouse guestbook --project kargo-simple
@@ -314,9 +330,31 @@ kargo delete project kargo-simple     # deletes everything in the Project, inclu
 * **staging**: automatic once the Freight passes dev verification. Kargo
   opens a PR on `main` updating `versions/staging.yaml` and waits. Merge it to
   deploy; close it to cancel. Then open http://localhost:32081.
-* **prod**: manual. Promote the staging-verified Freight in the UI (or
+* **staging-rc**: automatic once the Freight passes staging verification.
+  Deploys nothing: pushes the git tag `rc-<version>-<shortSHA>-<alias>-<freightShort>`
+  on the Freight's commit of `main` (`<version>` from `release/version.yaml`
+  at that commit, `<shortSHA>` = config commit, `<alias>` = the Freight's
+  alias in the Kargo UI, e.g. `dapper-coral`, `<freightShort>` = first 7
+  characters of the Freight name). prod only accepts Freight from this Stage.
+  Aliases can be renamed in the UI; don't rename a Freight between its staging
+  PR and its RC tag, or `rcTag` in `versions/*.yaml` won't match the tag (see
+  [Freight aliases can't be locked](#freight-aliases-cant-be-locked)).
+* **prod**: manual. Promote the release-candidate Freight in the UI (or
   `kargo promote --project kargo-simple --freight <freight> --stage prod`).
   Kargo opens the prod PR the same way. Then open http://localhost:32082.
+* **prod-release**: automatic once the Freight passes prod verification.
+  Pushes the git tag `rel-<version>-<freightShort>`. Each Freight gets its own
+  tag, so one version can have several releases (e.g. a config fix without a
+  version bump).
+
+Each tag's message records the version, image tag, config commit, Freight
+name and alias. List and inspect them with:
+
+```shell
+git fetch --tags
+git tag -l 'rc-*' 'rel-*'
+git show --no-patch rel-v0.1.0-ce8e911    # example tag name
+```
 
 After each deploy, the Stage runs the `smoke-test` verification (a `curl`
 Job). Only Freight that passes is verified and can be promoted to the next
@@ -325,6 +363,38 @@ Stage.
 See [Viewing verification results and logs](#viewing-verification-results-and-logs).
 
 ![promotion](docs/promotion.gif)
+
+### Freight aliases can't be locked
+
+Kargo has no setting to disable renaming a Freight alias in the UI or CLI.
+The alias is used only in the `rc-` tag name for readability; the tag stays
+unique and traceable through `<freightShort>` and the full Freight name in the
+tag message. To reduce the risk:
+
+* Don't rename a Freight once it has been promoted to staging.
+* Limit who can rename. Renaming is a write on the `freights` resource in the
+  Project, so users who only promote should get the `kargo-promoter` role, not
+  `kargo-admin`. Check what a role allows with
+  `kargo get role kargo-promoter --as-kubernetes-resources -o yaml --project kargo-simple`.
+  The local `admin` user in this runbook is a system admin and can always rename.
+* If a rename happened anyway, the tag is the source of truth:
+  `git tag -l 'rc-*-<freightShort>'` finds it regardless of the alias.
+
+### Cutting a release
+
+1. Bump `release/version.yaml` (e.g. `v0.1.0` → `v0.2.0`) in a PR and merge it.
+   The Warehouse creates Freight with the new version.
+2. dev promotes it, staging opens its PR (title `Promote v0.2.0 to staging: ...`).
+   Merge it.
+3. After staging verification, `staging-rc` pushes `rc-v0.2.0-<shortSHA>-<alias>-<freightShort>`
+   (e.g. `rc-v0.2.0-a640d14-dapper-coral-ce8e911`).
+4. Promote that Freight to prod and merge the prod PR. It records `rcTag` and
+   the planned `releaseTag` in `versions/prod.yaml`.
+5. After prod verification, `prod-release` pushes `rel-v0.2.0-<freightShort>`.
+
+Freight created from a commit before `release/version.yaml` existed cannot be
+promoted to staging, staging-rc, prod or prod-release: reading the version
+file fails. Promote Freight from a later commit.
 
 ### After merging a staging/prod PR
 

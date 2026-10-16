@@ -1,0 +1,4 @@
+# Version of the release train. Bump it in a PR to start a new release.
+# Kargo reads it at the Freight's commit of main and uses it in
+# versions/<stage>.yaml and in the rc-/rel- git tags.
+version: v0.1.0

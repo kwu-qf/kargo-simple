@@ -63,6 +63,65 @@ spec:
 apiVersion: kargo.akuity.io/v1alpha1
 kind: Stage
 metadata:
+  name: staging-rc
+  namespace: kargo-simple
+  annotations:
+    kargo.akuity.io/color: orange
+spec:
+  # Freight becomes available here only after it passes staging verification.
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: guestbook
+    sources:
+      stages:
+      - staging
+  # Deploys nothing: tags the Freight's commit of main as a release candidate,
+  # rc-<version>-<shortSHA>-<alias>-<freightShort>. <version> is release/version.yaml at
+  # that commit; <alias> is the Freight's alias in the Kargo UI (e.g.
+  # dapper-coral), for readability only; <freightShort> keeps the tag unique
+  # when a new image ships without a config change. Aliases can be renamed in
+  # the UI, so don't rename a Freight between its staging PR and its RC tag,
+  # or versions/*.yaml and the tag will disagree. With no verification, Freight counts as verified
+  # here once the tag is pushed, which makes it available to prod.
+  # Keep this format in sync with rcTag in kargo/promotiontask.yaml.
+  promotionTemplate:
+    spec:
+      vars:
+      - name: repoURL
+        value: https://github.com/kwu-qf/kargo-simple.git
+      - name: image
+        value: ghcr.io/kwu-qf/guestbook
+      steps:
+      - uses: git-clone
+        config:
+          repoURL: ${{ vars.repoURL }}
+          checkout:
+          - commit: ${{ commitFrom(vars.repoURL).ID }}
+            path: ./src
+      - uses: yaml-parse
+        as: release
+        config:
+          path: ./src/release/version.yaml
+          outputs:
+          - name: version
+            fromExpression: version
+      # The message records the Freight's contents, so the tag still resolves to
+      # an exact image and config after the Freight is gone from the cluster.
+      - uses: git-tag
+        config:
+          path: ./src
+          tag: rc-${{ outputs.release.version }}-${{ commitFrom(vars.repoURL).ID[0:7] }}-${{ ctx.targetFreight.alias }}-${{ ctx.targetFreight.name[0:7] }}
+          message: "staging verified: version ${{ outputs.release.version }}, guestbook ${{ imageFrom(vars.image).Tag }}, config ${{ commitFrom(vars.repoURL).ID }}, Freight ${{ ctx.targetFreight.name }} (${{ ctx.targetFreight.alias }})"
+      - uses: git-push
+        config:
+          path: ./src
+          tag: rc-${{ outputs.release.version }}-${{ commitFrom(vars.repoURL).ID[0:7] }}-${{ ctx.targetFreight.alias }}-${{ ctx.targetFreight.name[0:7] }}
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
   name: prod
   namespace: kargo-simple
   annotations:
@@ -72,9 +131,10 @@ spec:
   - origin:
       kind: Warehouse
       name: guestbook
+    # Only Freight tagged as a release candidate can be promoted to prod.
     sources:
       stages:
-      - staging
+      - staging-rc
   promotionTemplate:
     spec:
       steps:
@@ -109,9 +169,11 @@ spec:
     sources:
       stages:
       - prod
-  # Deploys nothing: tags the Freight's commit of main as a release.
-  # The tag name includes the short SHA because the same image tag can ship
-  # with different config.
+  # Deploys nothing: tags the Freight's commit of main as a release,
+  # rel-<version>-<freightShort>. <version> is release/version.yaml at that
+  # commit. The tag is unique per Freight, so one version can have several
+  # releases; bump release/version.yaml to start a new one.
+  # Keep this format in sync with releaseTag in kargo/promotiontask.yaml.
   promotionTemplate:
     spec:
       vars:
@@ -119,8 +181,6 @@ spec:
         value: https://github.com/kwu-qf/kargo-simple.git
       - name: image
         value: ghcr.io/kwu-qf/guestbook
-      - name: releaseTag
-        value: release-${{ imageFrom(vars.image).Tag }}-${{ commitFrom(vars.repoURL).ID[0:7] }}
       steps:
       - uses: git-clone
         config:
@@ -128,12 +188,21 @@ spec:
           checkout:
           - commit: ${{ commitFrom(vars.repoURL).ID }}
             path: ./src
+      - uses: yaml-parse
+        as: release
+        config:
+          path: ./src/release/version.yaml
+          outputs:
+          - name: version
+            fromExpression: version
+      # The message records the Freight's contents, so the tag still resolves to
+      # an exact image and config after the Freight is gone from the cluster.
       - uses: git-tag
         config:
           path: ./src
-          tag: ${{ vars.releaseTag }}
-          message: "prod verified: ${{ imageFrom(vars.image).Tag }} @ ${{ commitFrom(vars.repoURL).ID }} (Freight ${{ ctx.targetFreight.name }})"
+          tag: rel-${{ outputs.release.version }}-${{ ctx.targetFreight.name[0:7] }}
+          message: "prod verified: version ${{ outputs.release.version }}, guestbook ${{ imageFrom(vars.image).Tag }}, config ${{ commitFrom(vars.repoURL).ID }}, Freight ${{ ctx.targetFreight.name }} (${{ ctx.targetFreight.alias }})"
       - uses: git-push
         config:
           path: ./src
-          tag: ${{ vars.releaseTag }}
+          tag: rel-${{ outputs.release.version }}-${{ ctx.targetFreight.name[0:7] }}

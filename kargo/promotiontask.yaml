@@ -43,6 +43,15 @@ spec:
       outPath: ./out
 
   # --- approval gate: one PR on main changing versions/<stage>.yaml ---------
+  # Release train version at the Freight's commit (people bump it via PR).
+  - uses: yaml-parse
+    if: ${{ vars.approval == 'true' }}
+    as: release
+    config:
+      path: ./src/release/version.yaml
+      outputs:
+      - name: version
+        fromExpression: version
   # Read the previously approved record before it is overwritten, so the PR
   # can link to the config diff between the old and new configCommit.
   - uses: yaml-parse
@@ -51,10 +60,15 @@ spec:
     config:
       path: ./main/versions/${{ ctx.stage }}.yaml
       outputs:
+      - name: version
+        fromExpression: version
       - name: tag
-        fromExpression: tag
+        fromExpression: images.guestbook.tag
       - name: configCommit
         fromExpression: configCommit
+  # rcTag and releaseTag are the names the tag Stages will create for this
+  # Freight (rc after staging verification, rel after prod verification).
+  # Keep these formats in sync with staging-rc and prod-release in kargo/stages.yaml.
   - uses: yaml-update
     if: ${{ vars.approval == 'true' }}
     config:
@@ -62,17 +76,28 @@ spec:
       updates:
       - key: freight
         value: ${{ ctx.targetFreight.name }}
-      - key: image
-        value: ${{ vars.image }}
-      - key: tag
-        value: ${{ imageFrom(vars.image).Tag }}
+      - key: version
+        value: ${{ task.outputs.release.version }}
       - key: configCommit
         value: ${{ commitFrom(vars.repoURL).ID }}
+      - key: images.guestbook.image
+        value: ${{ vars.image }}
+      - key: images.guestbook.tag
+        value: ${{ imageFrom(vars.image).Tag }}
+      - key: rcTag
+        value: rc-${{ task.outputs.release.version }}-${{ commitFrom(vars.repoURL).ID[0:7] }}-${{ ctx.targetFreight.alias }}-${{ ctx.targetFreight.name[0:7] }}
+  - uses: yaml-update
+    if: ${{ vars.approval == 'true' && ctx.stage == 'prod' }}
+    config:
+      path: ./main/versions/${{ ctx.stage }}.yaml
+      updates:
+      - key: releaseTag
+        value: rel-${{ task.outputs.release.version }}-${{ ctx.targetFreight.name[0:7] }}
   - uses: git-commit
     if: ${{ vars.approval == 'true' }}
     config:
       path: ./main
-      message: "[${{ ctx.stage }}] promote ${{ imageFrom(vars.image).Tag }} @ ${{ commitFrom(vars.repoURL).ID }}"
+      message: "[${{ ctx.stage }}] promote ${{ task.outputs.release.version }}: guestbook ${{ imageFrom(vars.image).Tag }} @ ${{ commitFrom(vars.repoURL).ID }}"
   - uses: git-push
     if: ${{ vars.approval == 'true' }}
     as: pushRecord
@@ -86,14 +111,20 @@ spec:
       repoURL: ${{ vars.repoURL }}
       sourceBranch: ${{ task.outputs.pushRecord.branch }}
       targetBranch: main
-      title: "Promote to ${{ ctx.stage }}: ${{ imageFrom(vars.image).Tag }}"
+      title: "Promote ${{ task.outputs.release.version }} to ${{ ctx.stage }}: guestbook ${{ imageFrom(vars.image).Tag }}"
       # On the first promotion versions/<stage>.yaml is empty: no diff to link.
       description: |
         Freight: `${{ ctx.targetFreight.name }}`
 
-        Image: `${{ task.outputs.prev.tag == '' ? '(none)' : task.outputs.prev.tag }}` → `${{ imageFrom(vars.image).Tag }}`
+        Version: `${{ task.outputs.prev.version == '' ? '(none)' : task.outputs.prev.version }}` → `${{ task.outputs.release.version }}`
+
+        guestbook: `${{ task.outputs.prev.tag == '' ? '(none)' : task.outputs.prev.tag }}` → `${{ imageFrom(vars.image).Tag }}`
 
         Config diff: ${{ task.outputs.prev.configCommit == '' ? '(first promotion, nothing to compare)' : trimSuffix(vars.repoURL, '.git') + '/compare/' + task.outputs.prev.configCommit + '...' + commitFrom(vars.repoURL).ID }}
+
+        RC tag: `rc-${{ task.outputs.release.version }}-${{ commitFrom(vars.repoURL).ID[0:7] }}-${{ ctx.targetFreight.alias }}-${{ ctx.targetFreight.name[0:7] }}`${{ ctx.stage == 'prod' ? '' : ' (created after staging verification)' }}
+
+        Release tag: ${{ ctx.stage == 'prod' ? '`rel-' + task.outputs.release.version + '-' + ctx.targetFreight.name[0:7] + '` (created after prod verification)' : '(set by the prod promotion)' }}
   # A rejected or closed PR fails the Promotion here: nothing is pushed or deployed.
   - uses: git-wait-for-pr
     if: ${{ vars.approval == 'true' }}

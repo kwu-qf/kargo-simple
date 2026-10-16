@@ -1,6 +1,13 @@
 # Kargo's record of what was approved for prod.
 # Changed only through Kargo promotion PRs. Do not edit by hand.
 freight: ""          # Kargo Freight name
-image: ghcr.io/kwu-qf/guestbook
-tag: ""
+version: ""          # release/version.yaml at configCommit
 configCommit: ""     # commit of main that was rendered
+images:
+  guestbook:
+    image: ghcr.io/kwu-qf/guestbook
+    tag: ""
+# Created by staging-rc before this Freight could reach prod.
+rcTag: ""
+# Planned name; prod-release creates the tag after prod verification passes.
+releaseTag: ""
