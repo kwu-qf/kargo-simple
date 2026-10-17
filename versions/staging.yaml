@@ -1,11 +1,11 @@
 # Kargo's record of what was approved for staging.
 # Changed only through Kargo promotion PRs. Do not edit by hand.
-freight: 8cd3ec281e4a091f175a24598ba9e76d39b76a04
+freight: 94c871123fcd067e9f2d745ce2483f1805cae28d
 version: v0.1.0
 configCommit: cccb02a2a90c6b207662063dd9501fd2ce753d85
 images:
   guestbook:
     image: ghcr.io/kwu-qf/guestbook
-    tag: v0.0.4
+    tag: v0.0.5
 # Planned name; staging-rc creates the tag after staging verification passes.
-rcTag: rc-v0.1.0-cccb02a-edgy-mongoose-8cd3ec2
+rcTag: rc-v0.1.0-cccb02a-iron-stoat-94c8711
