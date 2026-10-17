@@ -1,0 +1,8 @@
+apiVersion: v1
+data:
+  APP_ENV: prod
+  LOG_LEVEL: warn
+kind: ConfigMap
+metadata:
+  name: guestbook-simple
+  namespace: guestbook-simple-prod
