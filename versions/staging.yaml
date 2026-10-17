@@ -8,4 +8,4 @@ images:
     image: ghcr.io/kwu-qf/guestbook
     tag: v0.0.4
 # Planned name; staging-rc creates the tag after staging verification passes.
-rcTag: rc-v0.1.0-cccb02a-incendiary-waterbuffalo-8cd3ec2
+rcTag: rc-v0.1.0-cccb02a-edgy-mongoose-8cd3ec2
