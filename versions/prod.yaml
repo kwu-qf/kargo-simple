@@ -1,13 +1,13 @@
 # Kargo's record of what was approved for prod.
 # Changed only through Kargo promotion PRs. Do not edit by hand.
-freight: ""          # Kargo Freight name
-version: ""          # release/version.yaml at configCommit
-configCommit: ""     # commit of main that was rendered
+freight: 8cd3ec281e4a091f175a24598ba9e76d39b76a04
+version: v0.1.0
+configCommit: cccb02a2a90c6b207662063dd9501fd2ce753d85
 images:
   guestbook:
     image: ghcr.io/kwu-qf/guestbook
-    tag: ""
+    tag: v0.0.4
 # Created by staging-rc before this Freight could reach prod.
-rcTag: ""
+rcTag: rc-v0.1.0-cccb02a-edgy-mongoose-8cd3ec2
 # Planned name; prod-release creates the tag after prod verification passes.
-releaseTag: ""
+releaseTag: rel-v0.1.0-8cd3ec2
