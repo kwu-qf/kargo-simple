@@ -1,11 +1,11 @@
 # Kargo's record of what was approved for staging.
 # Changed only through Kargo promotion PRs. Do not edit by hand.
-freight: 1625eecb366e1169bda316e5057af47ce18a96dc
+freight: 905b0b60bacdea10a7024dfba6b64e7c59aa541f
 version: v0.1.0
 configCommit: ddb68614dbd07f54b07c444a2073d3f3cacaf0b0
 images:
   guestbook:
     image: ghcr.io/kwu-qf/guestbook
-    tag: v0.0.5
+    tag: v0.0.7
 # Planned name; staging-rc creates the tag after staging verification passes.
-rcTag: rc-v0.1.0-ddb6861-olfactory-quail-1625eec
+rcTag: rc-v0.1.0-ddb6861-quiet-vulture-905b0b6
