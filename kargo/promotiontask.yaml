@@ -126,8 +126,11 @@ spec:
 
         Release tag: ${{ ctx.stage == 'prod' ? '`rel-' + task.outputs.release.version + '-' + ctx.targetFreight.name[0:7] + '` (created after prod verification)' : '(set by the prod promotion)' }}
   # A rejected or closed PR fails the Promotion here: nothing is pushed or deployed.
+  # git-open-pr is skipped (no output) when versions/<stage>.yaml on main already
+  # records this Freight, e.g. re-promoting the current Freight or retrying after
+  # the PR merged. That record was approved already, so deploy without waiting.
   - uses: git-wait-for-pr
-    if: ${{ vars.approval == 'true' }}
+    if: ${{ vars.approval == 'true' && task.outputs.openPR?.pr?.id != nil }}
     config:
       repoURL: ${{ vars.repoURL }}
       prNumber: ${{ task.outputs.openPR.pr.id }}
