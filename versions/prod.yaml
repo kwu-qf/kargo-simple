@@ -1,13 +1,13 @@
 # Kargo's record of what was approved for prod.
 # Changed only through Kargo promotion PRs. Do not edit by hand.
-freight: eefd988698a2c02101de9ba720ff78ce3db14a73
+freight: 1625eecb366e1169bda316e5057af47ce18a96dc
 version: v0.1.0
-configCommit: 05725eb33fe916cb9953cf320bcef98de53bf573
+configCommit: ddb68614dbd07f54b07c444a2073d3f3cacaf0b0
 images:
   guestbook:
     image: ghcr.io/kwu-qf/guestbook
     tag: v0.0.5
 # Created by staging-rc before this Freight could reach prod.
-rcTag: rc-v0.1.0-05725eb-orderly-newt-eefd988
+rcTag: rc-v0.1.0-ddb6861-olfactory-quail-1625eec
 # Planned name; prod-release creates the tag after prod verification passes.
-releaseTag: rel-v0.1.0-eefd988
+releaseTag: rel-v0.1.0-1625eec
