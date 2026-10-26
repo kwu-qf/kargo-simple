@@ -1,0 +1,51 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: PromotionTask
+metadata:
+  # Render stages/dev at the Freight's commit, push 2i/stage/dev, sync Argo CD.
+  name: deploy-direct
+  namespace: kargo-2i-dev
+spec:
+  vars:
+  - name: repoURL
+    value: https://github.com/kwu-qf/kargo-simple.git
+  - name: image
+    value: ghcr.io/kwu-qf/guestbook
+  steps:
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.repoURL }}
+      checkout:
+      - commit: ${{ commitFrom(vars.repoURL).ID }}
+        path: ./src
+      - branch: 2i/stage/${{ ctx.stage }}
+        create: true
+        path: ./out
+  - uses: git-clear
+    config:
+      path: ./out
+  # Pin by digest, the same way the release side deploys. Never committed to main.
+  - uses: kustomize-set-image
+    config:
+      path: ./src/stages/${{ ctx.stage }}
+      images:
+      - image: ${{ vars.image }}
+        digest: ${{ imageFrom(vars.image).Digest }}
+  - uses: kustomize-build
+    config:
+      path: ./src/stages/${{ ctx.stage }}
+      outPath: ./out
+  - uses: git-commit
+    as: commit
+    config:
+      path: ./out
+      message: "[2i ${{ ctx.stage }}] ${{ imageFrom(vars.image).Tag }} @ ${{ commitFrom(vars.repoURL).ID }}"
+  - uses: git-push
+    config:
+      path: ./out
+  - uses: argocd-update
+    config:
+      apps:
+      - name: kargo-2i-${{ ctx.stage }}
+        sources:
+        - repoURL: ${{ vars.repoURL }}
+          desiredRevision: ${{ task.outputs.commit.commit }}

@@ -1,0 +1,14 @@
+# Release Kargo's record of what is approved for prod (two-instance add-on).
+# Changed only through Kargo approval PRs. Do not edit by hand.
+# The prod Stage deploys only the Freight named here.
+freight: ""
+devFreight: ""
+version: ""
+configCommit: ""
+images:
+  guestbook:
+    image: ""
+    tag: ""
+    digest: ""
+rcTag: ""
+releaseTag: ""

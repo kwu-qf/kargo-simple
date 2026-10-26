@@ -1,0 +1,17 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: ProjectConfig
+metadata:
+  name: kargo-2i-dev
+  namespace: kargo-2i-dev
+spec:
+  promotionPolicies:
+  # dev: every new Freight is deployed automatically.
+  - stageSelector:
+      name: dev
+    autoPromotionEnabled: true
+  # dev-handoff: Freight that passes dev verification is handed off
+  # automatically. staging-approve on the release side is manual, so a
+  # handoff opens no PR by itself.
+  - stageSelector:
+      name: dev-handoff
+    autoPromotionEnabled: true

@@ -1,0 +1,9 @@
+# Template for the handoff file. dev-handoff copies it to release.yaml on the
+# 2i/handoff/dev branch and fills in every key; only the dev Kargo writes that
+# branch, and the release Kargo's Warehouse turns each commit into Freight.
+devFreight: ""       # dev Kargo Freight name, for tracing back
+devAlias: ""         # dev Kargo Freight alias (readability only)
+image: ""            # image repository
+tag: ""              # image tag (readability only)
+digest: ""           # image digest; the release side deploys by digest
+configCommit: ""     # commit of main to render (also holds release/version.yaml)

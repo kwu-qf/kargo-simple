@@ -1,0 +1,358 @@
+# Release Kargo tasks. Freight here is a commit of 2i/handoff/dev, so
+# commitFrom(repoURL) is the handoff commit. Every step that needs app config,
+# release/version.yaml or a tag target uses configCommit from the handoff file.
+apiVersion: kargo.akuity.io/v1alpha1
+kind: PromotionTask
+metadata:
+  # approve: one PR on main recording the Freight in
+  # two-instance/versions/<env>.yaml. Merging it approves; nothing is deployed.
+  name: approve
+  namespace: kargo-2i-release
+spec:
+  vars:
+  - name: repoURL
+    value: https://github.com/kwu-qf/kargo-simple.git
+  - name: env               # staging or prod
+  steps:
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.repoURL }}
+      checkout:
+      - commit: ${{ commitFrom(vars.repoURL).ID }}
+        path: ./handoff
+      - branch: main
+        path: ./main
+  - uses: yaml-parse
+    as: handoff
+    config:
+      path: ./handoff/release.yaml
+      outputs:
+      - name: devFreight
+        fromExpression: devFreight
+      - name: image
+        fromExpression: image
+      - name: tag
+        fromExpression: tag
+      - name: digest
+        fromExpression: digest
+      - name: configCommit
+        fromExpression: configCommit
+  # The app config at the commit dev verified; holds release/version.yaml.
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.repoURL }}
+      checkout:
+      - commit: ${{ task.outputs.handoff.configCommit }}
+        path: ./src
+  - uses: yaml-parse
+    as: release
+    config:
+      path: ./src/release/version.yaml
+      outputs:
+      - name: version
+        fromExpression: version
+  # The current approval, for the PR description (old -> new).
+  - uses: yaml-parse
+    as: prev
+    config:
+      path: ./main/two-instance/versions/${{ vars.env }}.yaml
+      outputs:
+      - name: freight
+        fromExpression: freight
+      - name: version
+        fromExpression: version
+      - name: tag
+        fromExpression: images.guestbook.tag
+      - name: configCommit
+        fromExpression: configCommit
+  - uses: yaml-update
+    config:
+      path: ./main/two-instance/versions/${{ vars.env }}.yaml
+      updates:
+      - key: freight
+        value: ${{ ctx.targetFreight.name }}
+      - key: devFreight
+        value: ${{ task.outputs.handoff.devFreight }}
+      - key: version
+        value: ${{ task.outputs.release.version }}
+      - key: configCommit
+        value: ${{ task.outputs.handoff.configCommit }}
+      - key: images.guestbook.image
+        value: ${{ task.outputs.handoff.image }}
+      - key: images.guestbook.tag
+        value: ${{ task.outputs.handoff.tag }}
+      - key: images.guestbook.digest
+        value: ${{ task.outputs.handoff.digest }}
+      # Keep in sync with staging-rc in stages.yaml.
+      - key: rcTag
+        value: 2i-rc-${{ task.outputs.release.version }}-${{ task.outputs.handoff.configCommit[0:7] }}-${{ ctx.targetFreight.alias }}-${{ ctx.targetFreight.name[0:7] }}
+  - uses: yaml-update
+    if: ${{ vars.env == 'prod' }}
+    config:
+      path: ./main/two-instance/versions/${{ vars.env }}.yaml
+      updates:
+      # Keep in sync with prod-release in stages.yaml.
+      - key: releaseTag
+        value: 2i-rel-${{ task.outputs.release.version }}-${{ ctx.targetFreight.name[0:7] }}
+  - uses: git-commit
+    config:
+      path: ./main
+      message: "[2i ${{ vars.env }}] approve ${{ task.outputs.release.version }}: guestbook ${{ task.outputs.handoff.tag }} @ ${{ task.outputs.handoff.configCommit }}"
+  - uses: git-push
+    as: pushRecord
+    config:
+      path: ./main
+      generateTargetBranch: true
+  # Skipped when the record already names this Freight (no diff).
+  - uses: git-open-pr
+    as: openPR
+    config:
+      repoURL: ${{ vars.repoURL }}
+      sourceBranch: ${{ task.outputs.pushRecord.branch }}
+      targetBranch: main
+      title: "[2i] Approve ${{ task.outputs.release.version }} for ${{ vars.env }}: guestbook ${{ task.outputs.handoff.tag }}"
+      description: |
+        Approves Freight `${{ ctx.targetFreight.name }}` (${{ ctx.targetFreight.alias }}) for **${{ vars.env }}**. Merging deploys nothing: an admin deploys it from the `${{ vars.env }}` Stage afterwards.
+
+        Version: `${{ task.outputs.prev.version == '' ? '(none)' : task.outputs.prev.version }}` → `${{ task.outputs.release.version }}`
+
+        guestbook: `${{ task.outputs.prev.tag == '' ? '(none)' : task.outputs.prev.tag }}` → `${{ task.outputs.handoff.tag }}` (`${{ task.outputs.handoff.digest }}`)
+
+        Replaces approval: `${{ task.outputs.prev.freight == '' ? '(none)' : task.outputs.prev.freight }}`
+
+        Config diff: ${{ task.outputs.prev.configCommit == '' ? '(first approval, nothing to compare)' : trimSuffix(vars.repoURL, '.git') + '/compare/' + task.outputs.prev.configCommit + '...' + task.outputs.handoff.configCommit }}
+
+        Dev Freight: `${{ task.outputs.handoff.devFreight }}`, handoff commit `${{ commitFrom(vars.repoURL).ID }}`
+  # A closed PR fails the Promotion: the Freight never reaches the deploy Stage.
+  - uses: git-wait-for-pr
+    if: ${{ task.outputs.openPR?.pr?.id != nil }}
+    config:
+      repoURL: ${{ vars.repoURL }}
+      prNumber: ${{ task.outputs.openPR.pr.id }}
+      pollInterval: 10s
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: PromotionTask
+metadata:
+  # deploy: render and deploy, only if two-instance/versions/<env>.yaml on main
+  # names this Freight (strict check: rollbacks need an approval PR first).
+  name: deploy
+  namespace: kargo-2i-release
+spec:
+  vars:
+  - name: repoURL
+    value: https://github.com/kwu-qf/kargo-simple.git
+  - name: env               # staging or prod
+  # Option A: always "true"; rollbacks go through an approval PR. The switch
+  # exists only so a future break-glass policy needs no task change.
+  - name: requireRecord
+    value: "true"
+  steps:
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.repoURL }}
+      checkout:
+      - commit: ${{ commitFrom(vars.repoURL).ID }}
+        path: ./handoff
+      - branch: main
+        path: ./main
+      - branch: 2i/stage/${{ vars.env }}
+        create: true
+        path: ./out
+  - uses: yaml-parse
+    as: handoff
+    config:
+      path: ./handoff/release.yaml
+      outputs:
+      - name: image
+        fromExpression: image
+      - name: tag
+        fromExpression: tag
+      - name: digest
+        fromExpression: digest
+      - name: configCommit
+        fromExpression: configCommit
+  # --- record check -------------------------------------------------------
+  - uses: yaml-parse
+    as: approved
+    config:
+      path: ./main/two-instance/versions/${{ vars.env }}.yaml
+      outputs:
+      - name: freight
+        fromExpression: freight
+  - uses: fail
+    if: ${{ vars.requireRecord == 'true' && task.outputs.approved.freight != ctx.targetFreight.name }}
+    config:
+      message: "Freight ${{ ctx.targetFreight.name }} is not the approved record in two-instance/versions/${{ vars.env }}.yaml (approved: ${{ task.outputs.approved.freight }}). Approve it through ${{ vars.env }}-approve first."
+  # --- render at the approved config commit, pinned by digest ---------------
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.repoURL }}
+      checkout:
+      - commit: ${{ task.outputs.handoff.configCommit }}
+        path: ./src
+  - uses: git-clear
+    config:
+      path: ./out
+  - uses: kustomize-set-image
+    if: ${{ task.outputs.handoff.digest != '' }}
+    config:
+      path: ./src/stages/${{ vars.env }}
+      images:
+      - image: ${{ task.outputs.handoff.image }}
+        digest: ${{ task.outputs.handoff.digest }}
+  - uses: kustomize-set-image
+    if: ${{ task.outputs.handoff.digest == '' }}
+    config:
+      path: ./src/stages/${{ vars.env }}
+      images:
+      - image: ${{ task.outputs.handoff.image }}
+        tag: ${{ task.outputs.handoff.tag }}
+  - uses: kustomize-build
+    config:
+      path: ./src/stages/${{ vars.env }}
+      outPath: ./out
+  # --- deploy ---------------------------------------------------------------
+  # No changes (redeploying the same Freight): skipped, outputs the current HEAD.
+  - uses: git-commit
+    as: commit
+    config:
+      path: ./out
+      message: "[2i ${{ vars.env }}] ${{ task.outputs.handoff.tag }} @ ${{ task.outputs.handoff.configCommit }} (${{ ctx.targetFreight.alias }})"
+  - uses: git-push
+    config:
+      path: ./out
+  - uses: argocd-update
+    config:
+      apps:
+      - name: kargo-2i-${{ vars.env }}
+        sources:
+        - repoURL: ${{ vars.repoURL }}
+          desiredRevision: ${{ task.outputs.commit.commit }}
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: PromotionTask
+metadata:
+  # record-deployed: one PR on main updating two-instance/versions/prod-deployed.yaml
+  # with what prod runs after it passed the smoke test. A record only; the
+  # deploy check doesn't read it.
+  name: record-deployed
+  namespace: kargo-2i-release
+spec:
+  vars:
+  - name: repoURL
+    value: https://github.com/kwu-qf/kargo-simple.git
+  - name: env
+    value: prod
+  steps:
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.repoURL }}
+      checkout:
+      - commit: ${{ commitFrom(vars.repoURL).ID }}
+        path: ./handoff
+      - branch: main
+        path: ./main
+  - uses: yaml-parse
+    as: handoff
+    config:
+      path: ./handoff/release.yaml
+      outputs:
+      - name: devFreight
+        fromExpression: devFreight
+      - name: image
+        fromExpression: image
+      - name: tag
+        fromExpression: tag
+      - name: digest
+        fromExpression: digest
+      - name: configCommit
+        fromExpression: configCommit
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.repoURL }}
+      checkout:
+      - commit: ${{ task.outputs.handoff.configCommit }}
+        path: ./src
+  - uses: yaml-parse
+    as: release
+    config:
+      path: ./src/release/version.yaml
+      outputs:
+      - name: version
+        fromExpression: version
+  - uses: yaml-parse
+    as: prev
+    config:
+      path: ./main/two-instance/versions/${{ vars.env }}-deployed.yaml
+      outputs:
+      - name: freight
+        fromExpression: freight
+      - name: version
+        fromExpression: version
+      - name: tag
+        fromExpression: images.guestbook.tag
+      - name: prevFreight
+        fromExpression: previous.freight
+      - name: prevVersion
+        fromExpression: previous.version
+      - name: prevTag
+        fromExpression: previous.tag
+  # previous: the Freight this one replaced. Re-recording the same Freight
+  # keeps the existing previous block instead of pointing it at itself.
+  - uses: yaml-update
+    config:
+      path: ./main/two-instance/versions/${{ vars.env }}-deployed.yaml
+      updates:
+      - key: freight
+        value: ${{ ctx.targetFreight.name }}
+      - key: devFreight
+        value: ${{ task.outputs.handoff.devFreight }}
+      - key: version
+        value: ${{ task.outputs.release.version }}
+      - key: configCommit
+        value: ${{ task.outputs.handoff.configCommit }}
+      - key: images.guestbook.image
+        value: ${{ task.outputs.handoff.image }}
+      - key: images.guestbook.tag
+        value: ${{ task.outputs.handoff.tag }}
+      - key: images.guestbook.digest
+        value: ${{ task.outputs.handoff.digest }}
+      - key: releaseTag
+        value: 2i-rel-${{ task.outputs.release.version }}-${{ ctx.targetFreight.name[0:7] }}
+      - key: previous.freight
+        value: "${{ task.outputs.prev.freight == ctx.targetFreight.name ? task.outputs.prev.prevFreight : task.outputs.prev.freight }}"
+      - key: previous.version
+        value: "${{ task.outputs.prev.freight == ctx.targetFreight.name ? task.outputs.prev.prevVersion : task.outputs.prev.version }}"
+      - key: previous.tag
+        value: "${{ task.outputs.prev.freight == ctx.targetFreight.name ? task.outputs.prev.prevTag : task.outputs.prev.tag }}"
+  - uses: git-commit
+    config:
+      path: ./main
+      message: "[2i ${{ vars.env }}] deployed ${{ task.outputs.release.version }}: guestbook ${{ task.outputs.handoff.tag }} (${{ ctx.targetFreight.alias }})"
+  - uses: git-push
+    as: pushRecord
+    config:
+      path: ./main
+      generateTargetBranch: true
+  - uses: git-open-pr
+    as: openPR
+    config:
+      repoURL: ${{ vars.repoURL }}
+      sourceBranch: ${{ task.outputs.pushRecord.branch }}
+      targetBranch: main
+      title: "[2i] Record ${{ vars.env }} deployed: ${{ task.outputs.release.version }}, guestbook ${{ task.outputs.handoff.tag }}"
+      description: |
+        Records what **${{ vars.env }}** runs after it passed the smoke test. A record only: merging changes nothing in the cluster.
+
+        Freight: `${{ task.outputs.prev.freight == '' ? '(none)' : task.outputs.prev.freight }}` → `${{ ctx.targetFreight.name }}` (${{ ctx.targetFreight.alias }})
+
+        guestbook: `${{ task.outputs.prev.tag == '' ? '(none)' : task.outputs.prev.tag }}` → `${{ task.outputs.handoff.tag }}` (`${{ task.outputs.handoff.digest }}`)
+  - uses: git-wait-for-pr
+    if: ${{ task.outputs.openPR?.pr?.id != nil }}
+    config:
+      repoURL: ${{ vars.repoURL }}
+      prNumber: ${{ task.outputs.openPR.pr.id }}
+      pollInterval: 10s

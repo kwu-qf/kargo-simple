@@ -50,9 +50,12 @@ main (protected, PRs only)
 │   ├── dev/
 │   ├── staging/
 │   └── prod/
-└── kargo/           # Kargo Project, Warehouse, Stages, PromotionTask
+├── kargo/           # Kargo Project, Warehouse, Stages, PromotionTask
+└── two-instance/    # add-on: dev Kargo + release Kargo in two kind clusters
+                     # (see two-instance/README.md); never creates Freight here
 
 stage/dev  stage/staging  stage/prod   # rendered YAML; only Kargo pushes
+2i/stage/*  2i/handoff/dev             # used only by the two-instance add-on
 ```
 
 | Location | Answers | Written by | Edit by hand |
@@ -702,6 +705,103 @@ open PR blocks the queue, so nothing inside Kargo can replace that PR. Either:
 4. Close the open PR (or run the retire script).
 5. Expect v0.0.3 and v0.0.4 to fail with "superseded", and only v0.0.5 to open a PR.
 
+#### Idea: let Freight soak in dev first (`requiredSoakTime`)
+
+Status: **proposal, not implemented**. Verified against the Kargo **v1.12.4**
+source code; open source, no Enterprise feature.
+
+The layers above clean up the queue after it forms. A soak time stops most of it
+from forming: Freight becomes available to staging only after it has stayed in
+dev, uninterrupted, for a minimum time. A burst of dev pushes then produces one
+staging Promotion (one PR) for whatever is still in dev when things go quiet.
+
+```yaml
+# kargo/stages.yaml, staging Stage
+requestedFreight:
+- origin:
+    kind: Warehouse
+    name: guestbook
+  sources:
+    stages:
+    - dev
+    requiredSoakTime: 2h    # pattern ^([0-9]+(\.[0-9]+)?(s|m|h))+$, e.g. 30m, 1h30m
+```
+
+**How v1.12.4 measures it**
+
+| Question | Answer | Where in v1.12.4 |
+|---|---|---|
+| When does the clock start? | When the Freight is deployed to dev, not when it is verified | `api/v1alpha1/freight_types.go` (`CurrentStage.Since`) |
+| Does it need verification? | Yes. Soak is checked in addition to verification; a stay only counts if the Freight is verified in dev | `GetLongestSoak`, `RemoveCurrentStage` |
+| Continuous or cumulative? | Continuous: the longest single stay counts. Three 40m stays don't make 2h | `VerifiedStage.LongestCompletedSoak` |
+| Freight replaced in dev? | The clock stops; that stay is kept as its longest soak. Coming back starts a new stay from zero | `RemoveCurrentStage`, `AddCurrentStage` |
+| Re-promoting the same Freight to dev? | Doesn't reset the clock | `AddCurrentStage` |
+| Bypass? | Manual approval for staging makes Freight available without soak (and without dev verification) | `api/v1alpha1/stage_types.go` (`RequiredSoakTime` doc) |
+| Where is it enforced? | In the availability check used by both the UI and auto-promotion, so un-soaked Freight can't be promoted to staging at all unless approved | `pkg/api/stage.go` (`ListFreightAvailableToStage`) |
+| How fast after soak completes? | Within about 5 minutes: the Stage is re-checked every 5 minutes, with no timer set for the moment soak ends | `pkg/controller/stages/regular_stages.go` (`RequeueAfter: 5 * time.Minute`) |
+
+**Which Freight is promoted when the soak time is reached?** The newest
+Freight that is **available** to staging, by discovery time
+(`SelectAutoPromotionCandidates`, `NewestFreight`). Usually that is the Freight
+currently in dev, because anything older was replaced before it soaked. Edge
+case: if F4 finishes soaking and F5 reaches dev within the next ~5 minutes,
+before the Stage is re-checked, F4 still gets promoted (its 2h stay is
+recorded), and F5 gets its own Promotion only if it soaks too.
+
+**Example (2h soak)**
+
+```text
+09:00  F1 → dev (verified 09:03)
+09:20  F2 → dev     F1 stops at 20m: never available to staging
+10:05  F3 → dev     F2 stops at 45m: never available
+11:30  F4 → dev     F3 stops at 1h25m: never available
+       ...no more pushes...
+13:30  F4 has soaked 2h → available → staging auto-promotes → 1 PR
+```
+
+Without soak this is 4 staging PRs; with it, 1.
+
+**Use cases**
+
+* **Smooth out noisy dev work**: `requiredSoakTime: 1h`–`4h` on `staging`,
+  matched to the usual gap between pushes.
+* **Roughly one staging update per day**: `12h` on `staging`. The day's last
+  build moves overnight. Not a guaranteed cadence: a late push restarts the clock.
+* **Let a release candidate run in staging before it is tagged**:
+  `requiredSoakTime: 24h` on `staging-rc` (`sources.stages: [staging]`). Catches
+  slow failures the smoke test misses (leaks, cron jobs, token expiry). Combines
+  with the dev soak above.
+* **Urgent fix that can't wait**: approve the Freight for staging; the PR gate
+  still applies.
+
+  ```shell
+  kargo approve --project kargo-simple --freight <freight-name> --stage staging
+  ```
+
+**Caveats**
+
+* If dev never stays quiet for the full soak time, nothing auto-promotes; use
+  approval or a manual promotion.
+* Promotions already queued before the change still run; abort them and close
+  their PRs once (see "What to do today").
+* Older Freight that once soaked stays available. Auto-promotion only picks the
+  newest, so it causes no extra PRs, but it still appears as promotable in the UI.
+* Rolling dev back to an older Freight restarts its clock, unless an earlier
+  stay already met the soak time.
+* It reduces the queue but doesn't remove it: two quiet periods while a staging
+  PR is open still queue two Promotions. Layers 1 and 2 still apply.
+
+**Test plan once implemented**
+
+1. Set `requiredSoakTime: 10m` on `staging`, `kargo apply -f kargo/`.
+2. Push three image tags a minute or two apart and let them pass dev.
+3. `kargo get promotions --project kargo-simple --stage staging`: no new staging
+   Promotion while they arrive.
+4. About 10–15 minutes after the last one, expect exactly one staging
+   Promotion (and PR), for the last tag.
+5. `kubectl get freight -n kargo-simple -o yaml`: `status.verifiedIn.dev.longestSoak`
+   on the replaced Freight is under 10m.
+
 ### Troubleshooting
 
 #### Warehouse: `error listing tags ... ghcr.io/token ... UNAUTHORIZED: authentication required`
@@ -864,6 +964,25 @@ PR is open; that is normal.
 If the Promotion fails at `git-open-pr`, the `github-creds` token can't open
 PRs (needs `repo` scope).
 
+#### Promotion: `cannot fetch id from <nil>` at `task.outputs.openPR.pr.id`
+
+`git-open-pr` was **skipped**: `versions/<stage>.yaml` on `main` already
+records this exact Freight, so the record branch has no diff and there is no
+PR. This happens when you promote the Freight that is already in that Stage, or
+retry after its PR was merged (for example, a later step failed). The record on
+`main` was approved already, so `kargo/promotiontask.yaml` now runs
+`git-wait-for-pr` only when a PR was opened
+(`task.outputs.openPR?.pr?.id != nil`) and otherwise goes straight to deploy.
+Apply it and promote again:
+
+```shell
+kargo apply -f kargo/promotiontask.yaml
+kargo promote --project kargo-simple --freight <freight> --stage staging
+```
+
+The skipped run still pushes a `kargo/promotion/<promotion-name>` branch
+identical to `main`; delete it on GitHub if you want.
+
 #### Verification: `container has runAsNonRoot and image has non-numeric user (curl_user)`
 
 The smoke-test pod runs with `runAsNonRoot: true`, and the `curlimages/curl`
@@ -895,3 +1014,19 @@ git push origin --delete stage/dev stage/staging stage/prod
 ### Bring it back
 
 Run steps 1–5 again (skip step 0). Re-export `GH_PAT` first in a new terminal.
+
+### Add-on: two-instance Kargo (two more kind clusters)
+
+`two-instance/` runs the target design from `kargo-promotion-design.html` next to
+this pipeline: a dev Kargo in cluster `kargo-2i-dev` and a release Kargo
+(staging and prod) in cluster `kargo-2i-release`, linked only through the Git
+branch `2i/handoff/dev`. Approval and deployment are separate Stages, and
+deploys check `two-instance/versions/<env>.yaml`. This cluster
+(`kargo-quickstart`) and its pipeline are not changed.
+
+```shell
+sh two-instance/kind.sh      # creates both clusters (host ports 311xx / 312xx, 32180, 32281, 32282)
+```
+
+Then follow "Runbook: two-instance kind environment" in
+[two-instance/README.md](two-instance/README.md).

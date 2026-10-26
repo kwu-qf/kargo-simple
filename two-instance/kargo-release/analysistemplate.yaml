@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  # Same smoke test as ../../kargo/analysistemplate.yaml, in this Project.
+  name: smoke-test
+  namespace: kargo-2i-release
+spec:
+  args:
+  - name: namespace           # app namespace, e.g. guestbook-simple-staging
+  - name: path
+    value: /info
+  metrics:
+  - name: http-check
+    provider:
+      job:
+        spec:
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 100        # curl_user in curlimages/curl
+                runAsGroup: 101
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+              - name: curl
+                image: curlimages/curl:8.11.1
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities: { drop: ["ALL"] }
+                command:
+                - sh
+                - -c
+                - >-
+                  curl -fsS --max-time 5
+                  --retry 5 --retry-delay 5 --retry-connrefused --retry-all-errors
+                  "http://guestbook-simple.{{args.namespace}}.svc.cluster.local{{args.path}}"
+                  && echo " <- {{args.path}} OK"

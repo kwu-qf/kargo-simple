@@ -1,0 +1,8 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Project
+metadata:
+  # Dev Kargo (cluster kargo-2i-dev). Its only output to the release Kargo is
+  # the 2i/handoff/dev branch.
+  name: kargo-2i-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"

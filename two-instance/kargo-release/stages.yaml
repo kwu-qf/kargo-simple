@@ -1,0 +1,272 @@
+# Release pipeline:
+#   staging-approve (manual, PR) -> staging (admin, deploy) -> staging-rc (auto, tag)
+#   -> prod-approve (manual, PR) -> prod (admin, deploy) -> prod-release (auto, tag)
+#                                                       -> prod-deployed (auto, record PR)
+# Stages without verification count Freight as verified once their Promotion
+# succeeds, so a merged approval PR is what makes Freight deployable.
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: staging-approve
+  namespace: kargo-2i-release
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: from-dev
+    sources:
+      direct: true
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: approve
+        vars:
+        - name: env
+          value: staging
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: staging
+  namespace: kargo-2i-release
+  annotations:
+    kargo.akuity.io/color: amber
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: from-dev
+    sources:
+      stages:
+      - staging-approve
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: deploy
+        vars:
+        - name: env
+          value: staging
+  verification:
+    analysisTemplates:
+    - name: smoke-test
+    args:
+    - name: namespace
+      value: guestbook-simple-staging
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: staging-rc
+  namespace: kargo-2i-release
+  annotations:
+    kargo.akuity.io/color: orange
+spec:
+  # Deploys nothing: tags the approved config commit as a release candidate,
+  # 2i-rc-<version>-<configShort>-<alias>-<freightShort>. Keep this format in
+  # sync with rcTag in promotiontasks.yaml (approve).
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: from-dev
+    sources:
+      stages:
+      - staging
+  promotionTemplate:
+    spec:
+      vars:
+      - name: repoURL
+        value: https://github.com/kwu-qf/kargo-simple.git
+      steps:
+      - uses: git-clone
+        config:
+          repoURL: ${{ vars.repoURL }}
+          checkout:
+          - commit: ${{ commitFrom(vars.repoURL).ID }}
+            path: ./handoff
+      - uses: yaml-parse
+        as: handoff
+        config:
+          path: ./handoff/release.yaml
+          outputs:
+          - name: tag
+            fromExpression: tag
+          - name: digest
+            fromExpression: digest
+          - name: configCommit
+            fromExpression: configCommit
+          - name: devFreight
+            fromExpression: devFreight
+      # Tag the commit of main that was rendered, not the handoff commit.
+      - uses: git-clone
+        config:
+          repoURL: ${{ vars.repoURL }}
+          checkout:
+          - commit: ${{ outputs.handoff.configCommit }}
+            path: ./src
+      - uses: yaml-parse
+        as: release
+        config:
+          path: ./src/release/version.yaml
+          outputs:
+          - name: version
+            fromExpression: version
+      - uses: git-tag
+        config:
+          path: ./src
+          tag: 2i-rc-${{ outputs.release.version }}-${{ outputs.handoff.configCommit[0:7] }}-${{ ctx.targetFreight.alias }}-${{ ctx.targetFreight.name[0:7] }}
+          message: "2i staging verified: version ${{ outputs.release.version }}, guestbook ${{ outputs.handoff.tag }} (${{ outputs.handoff.digest }}), config ${{ outputs.handoff.configCommit }}, Freight ${{ ctx.targetFreight.name }} (${{ ctx.targetFreight.alias }}), dev Freight ${{ outputs.handoff.devFreight }}"
+      - uses: git-push
+        config:
+          path: ./src
+          tag: 2i-rc-${{ outputs.release.version }}-${{ outputs.handoff.configCommit[0:7] }}-${{ ctx.targetFreight.alias }}-${{ ctx.targetFreight.name[0:7] }}
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: prod-approve
+  namespace: kargo-2i-release
+spec:
+  # Only Freight tagged as a release candidate can be approved for prod.
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: from-dev
+    sources:
+      stages:
+      - staging-rc
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: approve
+        vars:
+        - name: env
+          value: prod
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: prod
+  namespace: kargo-2i-release
+  annotations:
+    kargo.akuity.io/color: violet
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: from-dev
+    sources:
+      stages:
+      - prod-approve
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: deploy
+        vars:
+        - name: env
+          value: prod
+  verification:
+    analysisTemplates:
+    - name: smoke-test
+    args:
+    - name: namespace
+      value: guestbook-simple-prod
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: prod-release
+  namespace: kargo-2i-release
+  annotations:
+    kargo.akuity.io/color: green
+spec:
+  # Deploys nothing: tags prod-verified Freight 2i-rel-<version>-<freightShort>,
+  # once per Freight (NewestFreight). Keep in sync with releaseTag in
+  # promotiontasks.yaml (approve, record-deployed).
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: from-dev
+    sources:
+      stages:
+      - prod
+  promotionTemplate:
+    spec:
+      vars:
+      - name: repoURL
+        value: https://github.com/kwu-qf/kargo-simple.git
+      steps:
+      - uses: git-clone
+        config:
+          repoURL: ${{ vars.repoURL }}
+          checkout:
+          - commit: ${{ commitFrom(vars.repoURL).ID }}
+            path: ./handoff
+      - uses: yaml-parse
+        as: handoff
+        config:
+          path: ./handoff/release.yaml
+          outputs:
+          - name: tag
+            fromExpression: tag
+          - name: digest
+            fromExpression: digest
+          - name: configCommit
+            fromExpression: configCommit
+          - name: devFreight
+            fromExpression: devFreight
+      - uses: git-clone
+        config:
+          repoURL: ${{ vars.repoURL }}
+          checkout:
+          - commit: ${{ outputs.handoff.configCommit }}
+            path: ./src
+      - uses: yaml-parse
+        as: release
+        config:
+          path: ./src/release/version.yaml
+          outputs:
+          - name: version
+            fromExpression: version
+      - uses: git-tag
+        config:
+          path: ./src
+          tag: 2i-rel-${{ outputs.release.version }}-${{ ctx.targetFreight.name[0:7] }}
+          message: "2i prod verified: version ${{ outputs.release.version }}, guestbook ${{ outputs.handoff.tag }} (${{ outputs.handoff.digest }}), config ${{ outputs.handoff.configCommit }}, Freight ${{ ctx.targetFreight.name }} (${{ ctx.targetFreight.alias }}), dev Freight ${{ outputs.handoff.devFreight }}"
+      - uses: git-push
+        config:
+          path: ./src
+          tag: 2i-rel-${{ outputs.release.version }}-${{ ctx.targetFreight.name[0:7] }}
+
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: prod-deployed
+  namespace: kargo-2i-release
+spec:
+  # Records whatever prod runs after its smoke test, including after a
+  # rollback (MatchUpstream), through a PR on main. prod-release keeps
+  # NewestFreight so each Freight is tagged only once.
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: from-dev
+    sources:
+      stages:
+      - prod
+      autoPromotionOptions:
+        selectionPolicy: MatchUpstream
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: record-deployed

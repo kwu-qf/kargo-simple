@@ -1,0 +1,23 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Warehouse
+metadata:
+  name: guestbook
+  namespace: kargo-2i-dev
+spec:
+  # Freight = image tag + commit of main, as in the single-Project pipeline.
+  subscriptions:
+  - name: guestbook-image
+    image:
+      repoURL: ghcr.io/kwu-qf/guestbook
+      imageSelectionStrategy: SemVer
+  - name: gitops-config
+    git:
+      repoURL: https://github.com/kwu-qf/kargo-simple.git
+      branch: main
+      # App config only. versions/ and two-instance/ (records, manifests,
+      # docs) never create Freight, so merging a record PR is not a release.
+      includePaths:
+      - base
+      - components
+      - release
+      - stages
