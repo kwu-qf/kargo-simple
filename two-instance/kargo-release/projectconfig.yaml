@@ -1,0 +1,22 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: ProjectConfig
+metadata:
+  name: kargo-2i-release
+  namespace: kargo-2i-release
+spec:
+  # Manual (no policy here): staging-approve, staging, prod-approve, prod.
+  # The approve Stages are dragged by release engineers; staging and prod are
+  # deployed by admins (restrict "promote" on them through Kargo roles).
+  promotionPolicies:
+  # Tag Freight that passed the staging smoke test: 2i-rc-...
+  - stageSelector:
+      name: staging-rc
+    autoPromotionEnabled: true
+  # Tag Freight that passed the prod smoke test: 2i-rel-...
+  - stageSelector:
+      name: prod-release
+    autoPromotionEnabled: true
+  # Record what prod runs (MatchUpstream) through a PR on main.
+  - stageSelector:
+      name: prod-deployed
+    autoPromotionEnabled: true

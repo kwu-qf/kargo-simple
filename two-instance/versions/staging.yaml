@@ -1,0 +1,13 @@
+# Release Kargo's record of what is approved for staging (two-instance add-on).
+# Changed only through Kargo approval PRs. Do not edit by hand.
+# The staging Stage deploys only the Freight named here.
+freight: ""
+devFreight: ""
+version: ""
+configCommit: ""
+images:
+  guestbook:
+    image: ""
+    tag: ""
+    digest: ""
+rcTag: ""

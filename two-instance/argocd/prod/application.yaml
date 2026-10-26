@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # Apply to cluster kargo-2i-release (kubectl --context kind-kargo-2i-release).
+  name: kargo-2i-prod
+  namespace: argocd
+  annotations:
+    # Lets the Kargo Stage "prod" in Project "kargo-2i-release" update and sync this app.
+    kargo.akuity.io/authorized-stage: kargo-2i-release:prod
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/kwu-qf/kargo-simple.git
+    # Rendered YAML pushed by Kargo; created on the first deploy to prod.
+    targetRevision: 2i/stage/prod
+    path: .
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: guestbook-simple-prod
+  # No automated sync: only Kargo's argocd-update deploys, after the record check.
+  syncPolicy:
+    syncOptions:
+    - CreateNamespace=true

@@ -1,0 +1,17 @@
+# What prod runs after it passed the smoke test (two-instance add-on).
+# Changed only through PRs opened by the prod-deployed Stage. Do not edit by hand.
+# A record only: the prod deploy check reads versions/prod.yaml, not this file.
+freight: ""
+devFreight: ""
+version: ""
+configCommit: ""
+images:
+  guestbook:
+    image: ""
+    tag: ""
+    digest: ""
+releaseTag: ""
+previous:          # the Freight this one replaced
+  freight: ""
+  version: ""
+  tag: ""

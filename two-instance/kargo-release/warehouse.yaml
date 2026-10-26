@@ -1,0 +1,19 @@
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Warehouse
+metadata:
+  name: from-dev
+  namespace: kargo-2i-release
+spec:
+  # Freight = one commit of 2i/handoff/dev, written only by the dev Kargo.
+  # No image subscription: image, digest and configCommit come from the
+  # handoff file, so commitFrom() here is the handoff commit, never main.
+  subscriptions:
+  - name: handoff
+    git:
+      repoURL: https://github.com/kwu-qf/kargo-simple.git
+      branch: 2i/handoff/dev
+      includePaths:
+      - release.yaml
+      # Older handoff commits beyond this are not discovered, so they can't be
+      # rebuilt as Freight for a rollback. The default is 20.
+      discoveryLimit: 50
